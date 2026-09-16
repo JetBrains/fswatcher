@@ -23,7 +23,19 @@ mod test_helpers;
 ///
 /// The way forward is to keep a small number of end-to-end tests and cover the rest in unit tests and/or platform-specific backend tests.
 
-const WATCH_TEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Wall-clock budget for a single end-to-end test, enforced from outside the runtime
+/// under test. It is a guard against a hang, not an assertion: the real deadlines are
+/// the per-event timeouts inside the test bodies.
+///
+/// Windows gets a much larger budget. Its immediate watcher polls file metadata every
+/// `POLL_INTERVAL` (see `src/backend/windows/immediate.rs`) instead of being woken by
+/// the OS, and the whole suite runs about four times slower there than on Linux or
+/// macOS, so the tests that wait for several events in a row need the headroom.
+const WATCH_TEST_TIMEOUT: Duration = if cfg!(target_os = "windows") {
+    Duration::from_secs(20)
+} else {
+    Duration::from_secs(5)
+};
 
 fn test_watcher() -> Watcher {
     let watch_options = watch::options::Builder::new().macos_latency(Duration::from_millis(0));

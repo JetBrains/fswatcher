@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      rust_log:
+        description: "RUST_LOG for the test step, e.g. watch=debug (the fs tests log nothing by default)"
+        required: false
+        default: ""
 
 # A new push to a branch supersedes the run that is already in flight for it.
 concurrency:
@@ -62,5 +67,9 @@ jobs:
 
       # The end-to-end tests in `tests/legacy_tests.rs` drive real file system
       # events, so they are the ones most likely to be slow on a CI machine.
+      # They print nothing unless RUST_LOG is set; re-run the workflow manually
+      # with the `rust_log` input to get tracing output out of a failure.
       - name: Test
         run: cargo test --locked --no-fail-fast
+        env:
+          RUST_LOG: ${{ github.event.inputs.rust_log }}
