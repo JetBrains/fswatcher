@@ -7,3 +7,46 @@ A cross-platform file system watcher (FSEvents/kqueue on macOS, inotify on Linux
 
 See [doc/Overview.md](doc/Overview.md) for the design, and the `doc/` directory for
 notes on each platform backend.
+
+## Usage
+
+```toml
+[dependencies]
+watch = { git = "https://github.com/JetBrains/watch.git" }
+futures = "0.3"
+```
+
+```rust
+use futures::StreamExt;
+use watch::prelude::*;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let watcher = Watcher::create_default()?;
+    let mut events = watcher.watch_recursively("/some/directory");
+
+    while let Some(event) = events.next().await {
+        match event {
+            Event::Dirty { path, file_type } => println!("changed: {} ({file_type:?})", path.display()),
+            Event::Removed { path } => println!("gone: {}", path.display()),
+            Event::Rescan { path } => println!("rescan: {}", path.display()),
+        }
+    }
+
+    drop(events);
+    watcher.shutdown_and_join()
+}
+```
+
+One `Watcher` holds the OS resources and can be shared; each subscription is a stream
+of events for one path, registered as soon as it is created:
+
+- `watch_one(path)` — the path and, for a directory, its direct children.
+- `watch_recursively(path)` — the whole subtree, not following nested symlinks.
+- `watch_immediate(path)` — one regular file, seeing writes while the writer keeps it
+  open (macOS and Windows report none until the handle is closed).
+
+The path need not exist yet. `Rescan` means the change could not be expressed as events
+(OS buffer overflow, a slow client, a retargeted symlink) — re-read that subtree.
+
+For finer control use `watcher.session()`; see `examples/recursive_walk.rs`.
