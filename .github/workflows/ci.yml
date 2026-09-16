@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch supersedes the run that is already in flight for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # One platform failing should not hide the results of the others: the
+      # backends are entirely separate implementations.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (inotify)
+            os: ubuntu-latest
+          - name: macOS (FSEvents/kqueue)
+            os: macos-latest
+          - name: Windows (ReadDirectoryChangesW)
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runners ship rustup, and its cargo/rustc proxies install the version
+      # pinned in `rust-toolchain` on first use. Doing it here keeps the download
+      # out of the build log and fails early if the pinned version is gone.
+      - name: Rust toolchain
+        run: |
+          rustup show
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo registry and target directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # Covers the lib, the integration tests, the benches and the examples.
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      # The end-to-end tests in `tests/legacy_tests.rs` drive real file system
+      # events, so they are the ones most likely to be slow on a CI machine.
+      - name: Test
+        run: cargo test --locked --no-fail-fast
