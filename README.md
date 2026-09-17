@@ -1,4 +1,4 @@
-# watch
+# fswatcher
 
 [![internal JetBrains project](https://jb.gg/badges/internal-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub) [![CI](https://github.com/JetBrains/watch/actions/workflows/ci.yml/badge.svg)](https://github.com/JetBrains/watch/actions/workflows/ci.yml) 
 
