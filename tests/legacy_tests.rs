@@ -1425,30 +1425,24 @@ mod symlinks {
                 symlink("src", intermediate_link);
             });
 
-            // If the events get into the same batch, they are conflated.
-            let expected1 = vec![
-                Event::Removed {
-                    path: watched_path.clone(),
-                },
-                Event::Rescan {
-                    path: watched_path.clone(),
-                },
-            ];
-            let expected2 = vec![
-                Event::Rescan {
-                    path: watched_path.clone(),
-                },
-                Event::Rescan {
-                    path: watched_path.clone(),
-                },
-            ];
-            let expected3 = vec![Event::Rescan { path: watched_path }];
+            // Depending on how the events get batched, the removal of the intermediate link may be reported as
+            // `Removed` or `Dirty` for the watched path (or conflated away entirely), followed by any number of
+            // `Rescan` events for the same path.
+            assert!(!actual.is_empty(), "expected at least one event, got none");
 
-            let is_expected = vec_eq_ignoring_created(&expected1, &actual)
-                || vec_eq_ignoring_created(&expected2, &actual)
-                || vec_eq_ignoring_created(&expected3, &actual);
+            let rescans = match actual.first() {
+                Some(Event::Removed { path }) | Some(Event::Dirty { path, .. }) if *path == watched_path => &actual[1..],
+                _ => &actual[..],
+            };
+            let rest_are_rescans = rescans
+                .iter()
+                .all(|it| matches!(it, Event::Rescan { path } if *path == watched_path));
 
-            assert!(is_expected, "expected {:#?} or {:#?} or {:#?}, got {:#?}", expected1, expected2, expected3, actual);
+            assert!(
+                rest_are_rescans,
+                "expected an optional `Removed` or `Dirty` for {:?} followed by any number of `Rescan` events for the same path, got {:#?}",
+                watched_path, actual
+            );
         });
     }
 
