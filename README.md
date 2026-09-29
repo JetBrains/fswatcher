@@ -1,6 +1,6 @@
 # fswatcher
 
-[![internal JetBrains project](https://jb.gg/badges/internal-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub) [![CI](https://github.com/JetBrains/watch/actions/workflows/ci.yml/badge.svg)](https://github.com/JetBrains/watch/actions/workflows/ci.yml) 
+[![internal JetBrains project](https://jb.gg/badges/internal-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub) [![CI](https://github.com/JetBrains/fswatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JetBrains/fswatcher/actions/workflows/ci.yml) 
 
 A cross-platform file system watcher (FSEvents/kqueue on macOS, inotify on Linux,
 `ReadDirectoryChangesW` on Windows) with symlink canonicalization.
@@ -12,7 +12,7 @@ notes on each platform backend.
 
 ```toml
 [dependencies]
-watch = { git = "https://github.com/JetBrains/watch.git" }
+watch = { git = "https://github.com/JetBrains/fswatcher.git" }
 futures = "0.3"
 ```
 
