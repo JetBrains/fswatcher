@@ -15,7 +15,7 @@ use windows::{
         Enumeration::{DeviceClass, DeviceInformation, DeviceInformationUpdate, DeviceWatcher as WinDeviceWatcher, DeviceWatcherStatus},
         Portable::StorageDevice,
     },
-    Foundation::{EventRegistrationToken, TypedEventHandler},
+    Foundation::TypedEventHandler,
     Win32::Foundation::E_FAIL,
 };
 
@@ -35,9 +35,9 @@ pub enum DeviceWatcherMessage {
 }
 
 struct DeviceWatcherCallbacks {
-    added: EventRegistrationToken,
-    updated: EventRegistrationToken,
-    removed: EventRegistrationToken,
+    added: i64,
+    updated: i64,
+    removed: i64,
 }
 
 impl DeviceWatcher {
