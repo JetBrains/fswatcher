@@ -53,14 +53,13 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Cache cargo registry and target directory
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
           key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain') }}
 
       # Covers the lib, the integration tests, the benches and the examples.
