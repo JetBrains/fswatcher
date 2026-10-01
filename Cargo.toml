@@ -37,7 +37,7 @@ tracing = "0.1.44"
 inotify = "0.11"
 
 [target.'cfg(target_os="windows")'.dependencies]
-windows = { version = "0.58.0", features = ["Devices_Enumeration", "Devices_Portable", "Foundation", "Storage", "Win32_Foundation", "Win32_Security", "Win32_Storage", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
+windows = { version = "0.62.2", features = ["Devices_Enumeration", "Devices_Portable", "Foundation", "Storage", "Storage_Search", "Win32_Foundation", "Win32_Security", "Win32_Storage", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
 
 [target.'cfg(target_os="macos")'.dependencies]
 bitflags= "2.13.2"
