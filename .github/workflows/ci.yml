@@ -11,6 +11,9 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: read
+
 # A new push to a branch supersedes the run that is already in flight for it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
