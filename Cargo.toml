@@ -49,7 +49,7 @@ windows = { version = "0.58.0", features = ["Devices_Enumeration", "Devices_Port
 bitflags= "2.13.2"
 core-foundation = { version = "0.10", features = ["mac_os_10_8_features"] }
 dispatch2 = "0.3"
-nix = {  version = "0.29", features = ["event", "fs"] }
+nix = {  version = "0.31", features = ["event", "fs"] }
 libc = "0.2"
 
 [dev-dependencies]

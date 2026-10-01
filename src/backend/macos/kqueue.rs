@@ -1,6 +1,6 @@
 use std::{
     fmt, mem,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     path::Path,
     sync::{atomic::AtomicU32, Arc},
     thread,
@@ -10,7 +10,7 @@ use anyhow::Context;
 use libc::{O_EVTONLY, O_SYMLINK};
 use nix::{
     errno::Errno,
-    sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue},
+    sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue},
 };
 use nix::{
     fcntl::{open, OFlag},
@@ -48,7 +48,7 @@ impl KQueueWorker {
             &[KEvent::new(
                 pipe_reader.as_raw_fd() as usize,
                 EventFilter::EVFILT_READ,
-                EventFlag::EV_ADD | EventFlag::EV_CLEAR,
+                EvFlags::EV_ADD | EvFlags::EV_CLEAR,
                 FilterFlag::empty(),
                 0,
                 0,
@@ -86,7 +86,7 @@ impl KQueueWorker {
                                 return;
                             }
 
-                            if event.flags().contains(EventFlag::EV_ERROR) {
+                            if event.flags().contains(EvFlags::EV_ERROR) {
                                 let error = Errno::from_raw(event.data() as i32).desc();
                                 // TODO does it have a context which we can use to dispatch the error to the client?
                                 // Hopefully it doesn't occur on the next kqueue call.
@@ -119,9 +119,8 @@ impl KQueueWorker {
         trace!("make_kernel_queue_watch");
 
         let descriptor = open(canonical_path, OFlag::from_bits_retain(O_EVTONLY | O_SYMLINK), Mode::empty())
-            .map(|d| unsafe { OwnedFd::from_raw_fd(d) })
             .log(|e| trace!(error = e.desc(), "open failed"))?;
-        let file_info = fstat(descriptor.as_raw_fd()).log(|e| trace!(error = e.desc(), "fstat failed"))?;
+        let file_info = fstat(&descriptor).log(|e| trace!(error = e.desc(), "fstat failed"))?;
 
         let st_mode = SFlag::from_bits_retain(file_info.st_mode) & SFlag::S_IFMT;
         if st_mode != SFlag::S_IFREG {
@@ -136,7 +135,7 @@ impl KQueueWorker {
         let event = KEvent::new(
             descriptor.as_raw_fd() as usize,
             EventFilter::EVFILT_VNODE,
-            EventFlag::EV_ADD | EventFlag::EV_CLEAR,
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR,
             filter_flags,
             0,
             kevent_id as isize,
