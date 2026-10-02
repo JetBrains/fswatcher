@@ -133,8 +133,7 @@ jobs:
             exit 1
           fi
 
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit --quiet -m "Release $TAG_NAME" -- Cargo.toml Cargo.lock
+          git -c user.name="dummy" -c user.email="dummy@dummy.com" commit --quiet -m "Release $TAG_NAME" -- Cargo.toml Cargo.lock
       # Lets a re-run of a partially failed release get past an upload that already went through.
       - name: Check whether the version is already on crates.io
         id: published
