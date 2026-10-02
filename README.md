@@ -12,13 +12,13 @@ notes on each platform backend.
 
 ```toml
 [dependencies]
-watch = { git = "https://github.com/JetBrains/fswatcher.git" }
+jetbrains-fswatcher = "0.1"
 futures = "0.3"
 ```
 
 ```rust
 use futures::StreamExt;
-use watch::prelude::*;
+use jetbrains_fswatcher::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +50,19 @@ The path need not exist yet. `Rescan` means the change could not be expressed as
 (OS buffer overflow, a slow client, a retargeted symlink) — re-read that subtree.
 
 For finer control use `watcher.session()`; see `examples/recursive_walk.rs`.
+
+## Releasing
+
+Push a semver tag from a commit on `main` (or run the *Publish release* workflow
+manually with the tag name):
+
+```sh
+git tag 0.1.0 && git push origin 0.1.0
+```
+
+The workflow runs CI, publishes the crate to crates.io with the tag as its version
+(the `version` in `Cargo.toml` is only a placeholder), then publishes the GitHub release.
+
 ## License
 ```
    Copyright 2026 JetBrains s.r.o.

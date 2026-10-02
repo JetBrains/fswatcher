@@ -4,7 +4,7 @@ use std::{
 };
 
 use tracing::{debug, info};
-use watch::*;
+use jetbrains_fswatcher::*;
 
 fn main() {
     tracing_subscriber::fmt()

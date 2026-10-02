@@ -1,0 +1,163 @@
+name: Publish release
+run-name: ${{ github.event.inputs.tag_name || github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag to create or publish, for example 1.2.3
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CRATE_NAME: jetbrains-fswatcher
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_sha: ${{ steps.source.outputs.release_sha }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure release source is on default branch
+        id: source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo "Manual releases must be run from the default branch ($DEFAULT_BRANCH), not $GITHUB_REF_NAME." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin "$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          release_sha="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          if ! git merge-base --is-ancestor "$release_sha" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "Release commit $release_sha is not reachable from the default branch ($DEFAULT_BRANCH)." >&2
+            exit 1
+          fi
+
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+      - name: Resolve release tag
+        id: release
+        env:
+          DISPATCH_TAG_NAME: ${{ github.event.inputs.tag_name }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag_name="$DISPATCH_TAG_NAME"
+          else
+            tag_name="$GITHUB_REF_NAME"
+          fi
+
+          # The tag becomes the crate version, so it has to be valid semver.
+          if [[ ! "$tag_name" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Release tag must look like 1.2.3 or 1.2.3-rc.1: $tag_name" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag_name }}
+        run: |
+          release_args=(
+            --draft
+            --generate-notes
+            --title "$TAG_NAME"
+          )
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_args+=(--target "${{ steps.source.outputs.release_sha }}")
+          fi
+
+          gh release create "$TAG_NAME" "${release_args[@]}"
+
+  build-and-test:
+    needs: prepare-release
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs:
+      - prepare-release
+      - build-and-test
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: write
+      # Required by crates.io trusted publishing to mint a short-lived token.
+      id-token: write
+    steps:
+      # A draft release does not create its tag yet, so check out the commit
+      # rather than the tag (they are the same commit for tag pushes).
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.release_sha }}
+      - name: Rust toolchain
+        run: |
+          rustup show
+          cargo --version
+      # Cargo.toml only holds a placeholder version: the tag is the source of truth.
+      # The bump is committed locally (never pushed) so that `cargo publish` can
+      # run without --allow-dirty and refuses anything else in the working tree.
+      - name: Set crate version from tag
+        env:
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          sed -i "0,/^version = .*/s//version = \"$TAG_NAME\"/" Cargo.toml
+          cargo update --workspace
+          actual_version="$(cargo metadata --no-deps --format-version 1 | jq -r --arg name "$CRATE_NAME" '.packages[] | select(.name == $name) | .version')"
+          if [[ "$actual_version" != "$TAG_NAME" ]]; then
+            echo "Failed to set the crate version to $TAG_NAME (got $actual_version)." >&2
+            exit 1
+          fi
+
+          changed_files="$(git status --porcelain --untracked-files=all)"
+          if [[ "$changed_files" != $' M Cargo.lock\n M Cargo.toml' ]]; then
+            echo "Expected only Cargo.toml and Cargo.lock to change, got:" >&2
+            echo "$changed_files" >&2
+            exit 1
+          fi
+
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Release $TAG_NAME" -- Cargo.toml Cargo.lock
+      # Lets a re-run of a partially failed release get past an upload that already went through.
+      - name: Check whether the version is already on crates.io
+        id: published
+        env:
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          status="$(curl -s -o /dev/null -w '%{http_code}' -A "$GITHUB_REPOSITORY release workflow" "https://crates.io/api/v1/crates/$CRATE_NAME/$TAG_NAME")"
+          if [[ "$status" == "200" ]]; then
+            echo "$CRATE_NAME $TAG_NAME is already published, skipping upload."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Authenticate with crates.io
+        if: steps.published.outputs.already_published != 'true'
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+      # --locked: Cargo.lock was already updated and committed above, so it must not change.
+      - name: Publish to crates.io
+        if: steps.published.outputs.already_published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: cargo publish --locked
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: gh release edit "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
