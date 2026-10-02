@@ -1,9 +1,15 @@
 [package]
-name = "watch"
-version = "0.1.0"
+name = "jetbrains-fswatcher"
+# Placeholder: the release workflow sets the version from the pushed tag.
+version = "0.0.0"
 edition = "2021"
 resolver = "2"
-publish = false # "private"
+description = "A cross-platform file system watcher (FSEvents/kqueue, inotify, ReadDirectoryChangesW) with symlink canonicalization"
+license = "Apache-2.0"
+repository = "https://github.com/JetBrains/fswatcher"
+readme = "README.md"
+keywords = ["filesystem", "watcher", "fsevents", "inotify", "notify", "symlink"]
+categories = ["filesystem", "asynchronous"]
 
 [lib]
 doctest = false

@@ -9,7 +9,7 @@ use futures::{future::BoxFuture, stream::StreamExt, FutureExt};
 use tracing::info;
 
 use crate::test_helpers::test_with_custom_timeout;
-use watch::*;
+use jetbrains_fswatcher::*;
 
 #[path = "../src/test_helpers/mod.rs"]
 mod test_helpers;
@@ -38,8 +38,8 @@ const WATCH_TEST_TIMEOUT: Duration = if cfg!(target_os = "windows") {
 };
 
 fn test_watcher() -> Watcher {
-    let watch_options = watch::options::Builder::new().macos_latency(Duration::from_millis(0));
-    watch::Watcher::create(watch_options).expect("failed to create watcher")
+    let watch_options = jetbrains_fswatcher::options::Builder::new().macos_latency(Duration::from_millis(0));
+    jetbrains_fswatcher::Watcher::create(watch_options).expect("failed to create watcher")
 }
 
 // TODO this is extremely fragile, perhaps the approach with a latch file will work better
@@ -87,7 +87,7 @@ fn with_relative_paths(base: impl AsRef<Path>, events: Vec<Event>) -> Vec<Event>
 
 fn with_immediate_watch_subscription<F>(path: impl Into<PathBuf>, body: F)
 where
-    F: 'static + Send + FnOnce(watch::EventStream<'_>) -> BoxFuture<'_, ()>,
+    F: 'static + Send + FnOnce(jetbrains_fswatcher::EventStream<'_>) -> BoxFuture<'_, ()>,
 {
     use tokio::time;
 
@@ -212,7 +212,7 @@ mod watch_single_file {
     use super::*;
     use std::fs::rename;
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     #[test]
     fn create_file() {
@@ -275,8 +275,8 @@ mod watch_single_file {
                 ];
                 let expected2 = vec![Event::Removed { path: file_path.clone() }];
                 // I am not crazy. This test failed with:
-                // [2022-05-23T16:16:44.708034000Z TRACE watch::platform::fsevents] Raw event 183416084 /private/var/folders/ws/f6mpq4pj06zb0tb1p44szbbw0000kt/T/testing-dir.17fCr7SyGoh5/files/target kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemIsFile
-                // [2022-05-23T16:16:44.908063000Z TRACE watch::platform::fsevents] Raw event 183416090 /private/var/folders/ws/f6mpq4pj06zb0tb1p44szbbw0000kt/T/testing-dir.17fCr7SyGoh5/files/target kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemIsFile
+                // [2022-05-23T16:16:44.708034000Z TRACE jetbrains_fswatcher::platform::fsevents] Raw event 183416084 /private/var/folders/ws/f6mpq4pj06zb0tb1p44szbbw0000kt/T/testing-dir.17fCr7SyGoh5/files/target kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemIsFile
+                // [2022-05-23T16:16:44.908063000Z TRACE jetbrains_fswatcher::platform::fsevents] Raw event 183416090 /private/var/folders/ws/f6mpq4pj06zb0tb1p44szbbw0000kt/T/testing-dir.17fCr7SyGoh5/files/target kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemIsFile
                 let expected3 = vec![Event::Removed { path: file_path.clone() }, Event::Removed { path: file_path }];
                 let eq = vec_eq_ignoring_created(&actual, &expected1)
                     || vec_eq_ignoring_created(&actual, &expected2)
@@ -449,12 +449,12 @@ mod watch_single_file {
             // FSEvents coalesces both renames of the watched path into one event. The backend stats the path,
             // finds a regular file, and reports it as changed. The client re-reads the file either way.
             // [
-            //     watch::backend::macos::fs_event_stream::FSEventStreamEvent {
+            //     jetbrains_fswatcher::backend::macos::fs_event_stream::FSEventStreamEvent {
             //         id: 1340049679,
             //         path: "/private/var/folders/9d/dtyhgw_502n72wxldn41g6zm0000gn/T/testing-dirhg712I/files/another_dir/file",
             //         flags: "kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemIsFile",
             //     },
-            //     watch::backend::macos::fs_event_stream::FSEventStreamEvent {
+            //     jetbrains_fswatcher::backend::macos::fs_event_stream::FSEventStreamEvent {
             //         id: 1340049680,
             //         path: "/private/var/folders/9d/dtyhgw_502n72wxldn41g6zm0000gn/T/testing-dirhg712I/files/dir/file",
             //         flags: "kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRenamed | kFSEventStreamEventFlagItemIsFile",
@@ -550,7 +550,7 @@ mod watch_directory {
     use super::*;
     use std::fs::rename;
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     // -- change directory permissions
     // -- change child permissions
@@ -765,7 +765,7 @@ mod watch_directory_recursively {
     use super::*;
     use std::thread;
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     // -- create a distant child
     // -- delete a distant child
@@ -820,7 +820,7 @@ mod changes_in_parent_directories {
     use std::fs::{remove_dir_all, rename};
     use std::thread;
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     #[test]
     fn watch_non_existing_path() {
@@ -923,7 +923,7 @@ mod symlinks {
     use super::*;
     use std::fs;
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     #[test]
     #[cfg_attr(
@@ -1656,12 +1656,12 @@ mod symlinks {
 
             // FsEventStream might get confused, and we have no choice but to emit Rescan:
             // [
-            //     watch::new::backend::macos::fs_event_stream::FSEventStreamEvent {
+            //     jetbrains_fswatcher::new::backend::macos::fs_event_stream::FSEventStreamEvent {
             //         id: 3220716909,
             //         path: "/private/var/folders/xn/jmbk25y95jq15794293mbjcc0000gp/T/testing-dir2iAnlr/files/MainInt.java",
             //         flags: "kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemXattrMod | kFSEventStreamEventFlagItemIsSymlink",
             //     },
-            //     watch::new::backend::macos::fs_event_stream::FSEventStreamEvent {
+            //     jetbrains_fswatcher::new::backend::macos::fs_event_stream::FSEventStreamEvent {
             //         id: 3220716915,
             //         path: "/private/var/folders/xn/jmbk25y95jq15794293mbjcc0000gp/T/testing-dir2iAnlr/files/MainInt.java",
             //         flags: "kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemXattrMod | kFSEventStreamEventFlagItemIsSymlink",
@@ -1719,11 +1719,11 @@ mod immediate_change_tracking {
     use tracing::{info_span, instrument, trace, warn, Instrument};
 
     use crate::test_helpers::*;
-    use watch::FileType;
+    use jetbrains_fswatcher::FileType;
 
     #[instrument(skip_all, fields(expectation = ?expectation.as_ref()))]
     async fn act_expect_event_retrying<'a, T, F, E>(
-        subscription: &'a mut watch::EventStream<'_>,
+        subscription: &'a mut jetbrains_fswatcher::EventStream<'_>,
         mut idempotent_action: F,
         expectation: impl AsRef<Event>,
     ) -> anyhow::Result<()>
@@ -1767,7 +1767,7 @@ mod immediate_change_tracking {
     }
 
     #[instrument(skip_all, fields(expectation = ?expectation.as_ref()), ret(level = "trace"))]
-    async fn expect_event(subscription: &mut watch::EventStream<'_>, expectation: impl AsRef<Event>) -> anyhow::Result<bool> {
+    async fn expect_event(subscription: &mut jetbrains_fswatcher::EventStream<'_>, expectation: impl AsRef<Event>) -> anyhow::Result<bool> {
         trace!("expect_event");
 
         let timeout = Duration::from_secs(1);
@@ -2013,7 +2013,7 @@ mod subscriptions {
     use futures::StreamExt;
     use crate::test_helpers::*;
     use tokio::time::sleep;
-    use watch::{Event, FileType};
+    use jetbrains_fswatcher::{Event, FileType};
 
     #[test]
     fn nested_recursive_subscriptions_outer_survives() {
@@ -2143,7 +2143,7 @@ mod inotify {
     use std::os::unix::fs::symlink;
     use crate::test_helpers::*;
     use tracing::info;
-    use watch::{options::UlimitStrategy, FileType};
+    use jetbrains_fswatcher::{options::UlimitStrategy, FileType};
 
     #[test]
     fn directory_aliased_by_symlink() {
@@ -2226,7 +2226,7 @@ mod inotify {
 
         test_with_custom_timeout(Duration::from_secs(60), move |_rt| async move {
             let watcher = Arc::new({
-                let options = watch::options::Builder::new().linux_on_ulimit(UlimitStrategy::report_and_carry_on(|| {
+                let options = jetbrains_fswatcher::options::Builder::new().linux_on_ulimit(UlimitStrategy::report_and_carry_on(|| {
                     info!("as expected we get an error from inotify");
                 }));
                 Watcher::create(options).unwrap()
@@ -2249,7 +2249,7 @@ mod case_sensitivity {
     use std::fs::rename;
 
     use crate::test_helpers::*;
-    use watch::{Event, FileType};
+    use jetbrains_fswatcher::{Event, FileType};
 
     use crate::{assert_eq_events, collect_events, SETTLE_DOWN_DELAY};
 
