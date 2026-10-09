@@ -12,7 +12,7 @@ notes on each platform backend.
 
 ```toml
 [dependencies]
-jetbrains-fswatcher = "1.0"
+jetbrains-fswatcher = "1.0.0"
 futures = "0.3"
 ```
 
