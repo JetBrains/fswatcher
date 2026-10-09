@@ -12,7 +12,7 @@ notes on each platform backend.
 
 ```toml
 [dependencies]
-jetbrains-fswatcher = "0.1"
+jetbrains-fswatcher = "1.0"
 futures = "0.3"
 ```
 
@@ -57,7 +57,7 @@ Push a semver tag from a commit on `main` (or run the *Publish release* workflow
 manually with the tag name):
 
 ```sh
-git tag 0.1.0 && git push origin 0.1.0
+git tag 1.0.1 && git push origin 1.0.1
 ```
 
 The workflow runs CI, publishes the crate to crates.io with the tag as its version
