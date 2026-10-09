@@ -145,15 +145,20 @@ jobs:
             echo "$CRATE_NAME $TAG_NAME is already published, skipping upload."
             echo "already_published=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Authenticate with crates.io
-        if: steps.published.outputs.already_published != 'true'
-        id: crates-io-auth
-        uses: rust-lang/crates-io-auth-action@v1
+      # TEMPORARY: crates.io only allows configuring trusted publishing once the
+      # crate exists, so the very first release is published with an API token
+      # from the CARGO_REGISTRY_TOKEN secret. After it is out, add the trusted
+      # publisher on crates.io, restore the commented-out step below, switch the
+      # token back to steps.crates-io-auth.outputs.token, and delete the secret.
+      # - name: Authenticate with crates.io
+      #   if: steps.published.outputs.already_published != 'true'
+      #   id: crates-io-auth
+      #   uses: rust-lang/crates-io-auth-action@v1
       # --locked: Cargo.lock was already updated and committed above, so it must not change.
       - name: Publish to crates.io
         if: steps.published.outputs.already_published != 'true'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
       - name: Publish release
         env:
