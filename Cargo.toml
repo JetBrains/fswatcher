@@ -8,7 +8,7 @@ description = "A cross-platform file system watcher (FSEvents/kqueue, inotify, R
 license = "Apache-2.0"
 repository = "https://github.com/JetBrains/fswatcher"
 readme = "README.md"
-keywords = ["filesystem", "watcher", "fsevents", "inotify", "notify", "symlink"]
+keywords = ["filesystem", "watcher", "fsevents", "inotify", "symlink"]
 categories = ["filesystem", "asynchronous"]
 
 [lib]
