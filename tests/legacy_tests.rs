@@ -1906,14 +1906,30 @@ mod immediate_change_tracking {
                     .unwrap();
 
                     fs::remove_file(&middle_symlink_path).unwrap();
-                    expect_event(
-                        &mut subscription,
-                        Event::Removed {
-                            path: watched_path.clone(),
-                        },
-                    )
-                    .await
-                    .unwrap();
+                    let dirty_event = Event::Dirty {
+                        path: watched_path.clone(),
+                        file_type: FileType::Regular,
+                    };
+                    let removed_event = Event::Removed {
+                        path: watched_path.clone(),
+                    };
+                    let event = time::timeout(Duration::from_secs(1), subscription.next())
+                        .await
+                        .expect("didn't receive any events within the timeout")
+                        .expect("unexpected end of event stream");
+                    if cfg!(target_os = "macos") && event == dirty_event {
+                        // kqueue may report a single append as two separate kevents (NOTE_EXTEND and NOTE_WRITE),
+                        // see `write_to_a_file_without_closing_it` in kqueue.rs, so the write above may produce
+                        // a second Dirty event which arrives before the removal.
+                        expect_event(&mut subscription, &removed_event).await.unwrap();
+                    } else {
+                        assert!(
+                            event == removed_event || matches!(event, Event::Rescan { .. }),
+                            "expected {:#?} or rescan, received: {:#?}",
+                            removed_event,
+                            event
+                        );
+                    }
 
                     symlink("src/main.c", &middle_symlink_path);
                     expect_event(
