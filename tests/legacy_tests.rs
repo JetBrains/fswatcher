@@ -2194,6 +2194,7 @@ mod inotify {
     }
 
     #[test]
+    #[ignore = "run locally if need be, exhausting the limit on CI might take a long time"]
     fn watcher_remains_responsive_after_hitting_inotify_limit() {
         let _guard = single_thread();
         // On some machines, this test might be useless. E.g. my Linux installation has only 328913 directories,
