@@ -4,6 +4,7 @@ use std::{
     os::{raw, unix::ffi::OsStrExt},
     panic,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::Duration,
 };
@@ -18,13 +19,22 @@ use stream_event_flags::*;
 use crate::{backend::BackendEvent, FileType};
 
 pub struct FSEventStream {
+    /// Null when there is no stream: the path set is empty, or the stream is being rebuilt.
     ptr: FSEventStreamRef,
-    #[allow(unused)]
-    queue: DispatchRetained<DispatchQueue>,
     started: bool,
+    /// The event id to resume from if the stream delivers nothing: the `since_when` it was created with, or the
+    /// id that was current at its creation when it was created "since now".
+    resume_from: FSEventStreamEventId,
+    /// Owned by this struct and released on Drop, after the stream is invalidated.
+    /// It is the `info` pointer of the `FSEventStreamContext` of every incarnation of the stream.
+    callback: *mut CallbackContext,
+    queue: DispatchRetained<DispatchQueue>,
+    latency: Duration,
+    flags: FsEventStreamFlags,
+    paths_to_exclude: Vec<PathBuf>,
 }
 
-/// It has no API apart from Drop, so it is safe.
+/// The only API that touches the stream takes `&mut self`, so sharing a reference is safe.
 unsafe impl Sync for FSEventStream {}
 
 #[instrument(skip_all)]
@@ -37,8 +47,9 @@ pub fn fs_event_stream(
 ) -> Result<FSEventStream, FsEventStreamError> {
     let callback = CallbackContext {
         function: Box::new(callback),
+        latest_event_id: AtomicU64::new(NO_EVENT_ID),
     };
-    let mut stream = FSEventStream::new(callback, latency, paths_to_watch, paths_to_exclude, flags);
+    let mut stream = FSEventStream::new(callback, latency, paths_to_watch, paths_to_exclude, flags)?;
     stream.start()?;
     Ok(stream)
 }
@@ -81,7 +92,73 @@ impl FSEventStream {
         paths_to_watch: &[PathBuf],
         paths_to_exclude: &[PathBuf],
         flags: FsEventStreamFlags,
-    ) -> Self {
+    ) -> Result<Self, FsEventStreamError> {
+        let qos = DispatchQoS::Default;
+        let relative_priority = 0;
+        let attr = DispatchQueueAttr::with_qos_class(DispatchQueueAttr::SERIAL, qos, relative_priority);
+        let queue = DispatchQueue::new("FSEventsDispatchQueue", Some(attr.as_ref()));
+        let mut stream = Self {
+            ptr: std::ptr::null_mut(),
+            started: false,
+            resume_from: kFSEventStreamEventIdSinceNow,
+            // The context should be a heap pointer that lives as long as the stream; Drop releases it.
+            callback: Box::into_raw(Box::new(callback_ctx)),
+            queue,
+            latency,
+            flags,
+            paths_to_exclude: paths_to_exclude.to_vec(),
+        };
+        stream.create(paths_to_watch, kFSEventStreamEventIdSinceNow)?;
+        Ok(stream)
+    }
+
+    /// Replaces the set of watched paths with `paths_to_watch`.
+    ///
+    /// The new set is accepted as is: it fully replaces the previous one, and the paths are assumed to be canonical.
+    /// FSEvents cannot do it in place, so the current stream is stopped and released, and a new one is created
+    /// and started in its place. The new stream resumes from the last event id delivered by the old one (or from
+    /// the id current when the old one was created, if it has not delivered anything yet), so events under the new
+    /// set that have happened since are delivered after the switch (the `kFSEventStreamEventFlagHistoryDone`
+    /// sentinel that comes with them is filtered out, see [`fs_event_stream_callback`]). Events under a path that
+    /// is dropped from the set are lost if they have not been delivered by the time of the call.
+    ///
+    /// An empty set is accepted: FSEvents refuses to create a stream without paths, so no stream exists until the
+    /// next call. Everything that happens in the meantime is ignored, and the next non-empty set starts from "now".
+    ///
+    /// On failure the old stream is already gone and no events are delivered; the error is the same one
+    /// [`fs_event_stream`] reports.
+    #[instrument(skip(self))]
+    pub fn set_paths(&mut self, paths_to_watch: &[PathBuf]) -> Result<(), FsEventStreamError> {
+        let since_when = self.release();
+        trace!(since_when, "rebuilding the stream");
+        self.create(paths_to_watch, since_when)?;
+        self.start()
+    }
+
+    /// Creates (but does not start) the `FSEventStreamRef` for `paths_to_watch`; there must be none at this point.
+    ///
+    /// Fails if FSEvents refuses to create the stream, which is not expected for a set of existing canonical directories.
+    fn create(&mut self, paths_to_watch: &[PathBuf], since_when: FSEventStreamEventId) -> Result<(), FsEventStreamError> {
+        debug_assert!(self.ptr.is_null());
+        if paths_to_watch.is_empty() {
+            trace!("no paths to watch, not creating a stream");
+            // Nothing is kept, so there is nothing to resume for: the next stream starts from "now".
+            // There is no stream, hence no callback, so the context can be reset without synchronization.
+            self.resume_from = kFSEventStreamEventIdSinceNow;
+            unsafe { &*self.callback }.latest_event_id.store(NO_EVENT_ID, Ordering::Release);
+            return Ok(());
+        }
+        // Event ids are one global sequence, and a stream is a path filter over it; `kFSEventStreamEventIdSinceNow` is a
+        // placeholder for the head of the sequence at creation. If this stream is replaced before it has delivered
+        // anything, the next one must resume from that same position, not from a new "now", or everything this stream
+        // has received but not yet delivered would be skipped. So the head is read here and remembered. Every event
+        // under the paths that happens after this point is numbered after it, so nothing is missed; ids are assigned when
+        // fseventsd processes the kernel events, which lags a little, so a few events from just before may be replayed.
+        self.resume_from = if since_when == kFSEventStreamEventIdSinceNow {
+            unsafe { FSEventsGetCurrentEventId() }
+        } else {
+            since_when
+        };
         let paths_array = cf_array(paths_to_watch.len());
         for path in paths_to_watch {
             let path_string = path_to_cf_string(path.as_path());
@@ -90,13 +167,12 @@ impl FSEventStream {
             }
         }
 
-        // The context should be a heap pointer that lives as long as the stream.
-        let callback_ptr = Box::into_raw(Box::new(callback_ctx));
+        // The context is owned by this struct, which outlives the stream, hence no retain/release callbacks.
         let context = FSEventStreamContext {
             version: 0,
-            info: callback_ptr as *mut raw::c_void,
+            info: self.callback as *mut raw::c_void,
             retain: None,
-            release: Some(release_callback_info),
+            release: None,
             copy_description: None,
         };
 
@@ -106,39 +182,36 @@ impl FSEventStream {
                 fs_event_stream_callback,
                 &context,
                 paths_array.0,
-                kFSEventStreamEventIdSinceNow,
-                latency.as_secs_f64(),
-                flags.bits(),
+                since_when,
+                self.latency.as_secs_f64(),
+                self.flags.bits(),
             );
+            if stream_ptr.is_null() {
+                warn!(?paths_to_watch, "FSEventStreamCreate returned NULL");
+                return Err(FsEventStreamError("FSEventStreamCreate has failed"));
+            }
 
-            if !paths_to_exclude.is_empty() {
-                let cf_array = cf_array(paths_to_exclude.len());
-                for path in paths_to_exclude {
+            if !self.paths_to_exclude.is_empty() {
+                let cf_array = cf_array(self.paths_to_exclude.len());
+                for path in &self.paths_to_exclude {
                     let path_string = path_to_cf_string(path.as_path());
                     CFArrayAppendValue(cf_array.0, path_string.0);
                 }
                 if !FSEventStreamSetExclusionPaths(stream_ptr, cf_array.0) {
-                    warn!(?paths_to_exclude, "FSEventStreamSetExclusionPaths failed, events will be reported",);
+                    warn!(paths_to_exclude = ?self.paths_to_exclude, "FSEventStreamSetExclusionPaths failed, events will be reported");
                 }
             }
 
-            let qos = DispatchQoS::Default;
-            let relative_priority = 0;
-            let attr = DispatchQueueAttr::with_qos_class(DispatchQueueAttr::SERIAL, qos, relative_priority);
-            let queue = DispatchQueue::new("FSEventsDispatchQueue", Some(attr.as_ref()));
-            FSEventStreamSetDispatchQueue(stream_ptr, DispatchRetained::as_ptr(&queue).as_ptr() as _);
-
-            Self {
-                ptr: stream_ptr,
-                queue,
-                started: false,
-            }
+            FSEventStreamSetDispatchQueue(stream_ptr, DispatchRetained::as_ptr(&self.queue).as_ptr() as _);
+            self.ptr = stream_ptr;
         }
+        Ok(())
     }
 
+    /// Starts the stream, a no-op if it is already started or if there is no stream (an empty path set).
     #[instrument(skip_all)]
     fn start(&mut self) -> Result<(), FsEventStreamError> {
-        if !self.started {
+        if !self.started && !self.ptr.is_null() {
             let succeeds = unsafe { FSEventStreamStart(self.ptr) };
             trace!(?succeeds, "FSEventStreamStart");
             if succeeds {
@@ -151,19 +224,47 @@ impl FSEventStream {
             Ok(())
         }
     }
+
+    /// Stops, invalidates and releases the stream (if any) and returns the event id a new stream should resume from:
+    /// the id of the last delivered event, or [`FSEventStream::resume_from`] if there was none.
+    ///
+    /// `FSEventStreamGetLatestEventId` is not used for this: it also counts the `kFSEventStreamEventFlagHistoryDone` sentinel,
+    /// whose id is the current one at the end of the replay, so it would skip everything that happened during the replay.
+    fn release(&mut self) -> FSEventStreamEventId {
+        if self.ptr.is_null() {
+            // No stream, nothing delivered: "since now" after an empty set, or the id of a failed creation.
+            return self.resume_from;
+        }
+        unsafe {
+            if self.started {
+                FSEventStreamStop(self.ptr);
+                self.started = false;
+            }
+            FSEventStreamInvalidate(self.ptr);
+            FSEventStreamRelease(self.ptr);
+        }
+        self.ptr = std::ptr::null_mut();
+        // A callback may still be running on the queue when FSEventStreamStop returns; wait for it, so that the id
+        // of the last event it has delivered is accounted for, and so that the context can be released afterwards.
+        self.queue.exec_sync(|| {});
+        let latest_event_id = unsafe { &*self.callback }.latest_event_id.load(Ordering::Acquire);
+        if latest_event_id == NO_EVENT_ID {
+            self.resume_from
+        } else {
+            latest_event_id
+        }
+    }
 }
 
 unsafe impl Send for FSEventStream {}
 
 impl Drop for FSEventStream {
     fn drop(&mut self) {
-        unsafe {
-            if self.started {
-                FSEventStreamStop(self.ptr);
-            }
-            FSEventStreamInvalidate(self.ptr);
-            FSEventStreamRelease(self.ptr);
-        }
+        // The stream is stopped and invalidated, and the queue drained, before the callback context is released:
+        // a callback that was running when the stream was stopped has finished, and no new one is scheduled for an
+        // invalidated stream, so nobody can touch the context afterwards.
+        self.release();
+        drop(unsafe { Box::from_raw(self.callback) });
     }
 }
 
@@ -352,15 +453,16 @@ pub fn event(path: &Path, flags: FSEventStreamEventFlags, has_no_audience: bool)
     };
 }
 
+/// Placeholder of [`CallbackContext::latest_event_id`] before the first event; event ids start at 1.
+const NO_EVENT_ID: FSEventStreamEventId = 0;
+
 struct CallbackContext {
     function: Box<dyn FnMut(thread::Result<Vec<FSEventStreamEvent>>) + Send + 'static>,
+    /// The highest id of a delivered event (the sentinel excluded), shared by all the incarnations of the stream.
+    latest_event_id: AtomicU64,
 }
 
-extern "C" fn release_callback_info(info: *const raw::c_void) {
-    drop(unsafe { Box::from_raw(info as *mut CallbackContext) })
-}
-
-// Before Drop can release the CallbackContext, it stops FsEventStream.
+// Before Drop can release the CallbackContext, it stops and invalidates the FSEventStreamRef.
 // The client callback will not be called for this stream while it is stopped.
 extern "C" fn fs_event_stream_callback(
     _stream_ref: ConstFSEventStreamRef,
@@ -380,12 +482,24 @@ extern "C" fn fs_event_stream_callback(
         trace!(num_events, "fs_event_stream_callback received events");
         let mut events = Vec::<FSEventStreamEvent>::with_capacity(num_events);
         for i in 0..num_events {
+            let flags = event_flags[i];
+            // A stream created with a real `since_when` (see [`FSEventStream::set_paths`]) first replays the history and then
+            // emits this sentinel once. It is not an event about a path: it carries the first watched path, which is "/" for
+            // the default configuration, and `event()` turns a bare event for "/" into a rescan. Its id is also the current
+            // one at the end of the replay, so it must not be counted as a delivered event either.
+            if (flags & kFSEventStreamEventFlagHistoryDone) != 0 {
+                trace!(id = event_ids[i], "history replay is complete");
+                continue;
+            }
             let path_cstring = unsafe { CStr::from_ptr(event_paths[i]) };
             let path = PathBuf::from(OsStr::from_bytes(path_cstring.to_bytes()));
-            let flags = event_flags[i];
             let id = event_ids[i];
+            context.latest_event_id.fetch_max(id, Ordering::Release);
             events.push(FSEventStreamEvent { id, path, flags });
         }
+        // FSEvents does not order the events of a batch by id: a later creation has been observed listed before an earlier one.
+        // Ids grow with time, so sorting restores the order in which the events happened.
+        events.sort_by_key(|event| event.id);
 
         events
     });
@@ -547,4 +661,6 @@ extern "C" {
     fn FSEventStreamInvalidate(stream_ref: FSEventStreamRef);
     fn FSEventStreamRelease(stream_ref: FSEventStreamRef);
     fn FSEventStreamSetExclusionPaths(stream_ref: FSEventStreamRef, paths_to_exclude: CFMutableArrayRef) -> bool;
+    // The most recently generated event id, across all streams and processes.
+    fn FSEventsGetCurrentEventId() -> FSEventStreamEventId;
 }

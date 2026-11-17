@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
@@ -28,59 +28,72 @@ enum TestErr {
     Overflow,
 }
 
-fn test(body: impl FnOnce(&dyn WatcherBackend, SubscriptionId)) -> Result<Vec<(PathBuf, BackendEvent)>, TestErr> {
+fn default_backend_factory(options: BackendOptions, callback: BackendEventHandler, _vault: &Path) -> Box<dyn WatcherBackend> {
+    Box::new(default_backend(options, callback).unwrap())
+}
+
+/// Runs `body` against the backend made by `create_backend` and returns the events of its subscription.
+///
+/// The vault, passed to both closures, is a watched directory that produces the latch events delimiting the body.
+/// It must stay covered by the backend, see [`WatcherBackend::set_event_source_paths`].
+fn test(
+    create_backend: impl FnOnce(BackendOptions, BackendEventHandler, &Path) -> Box<dyn WatcherBackend>,
+    body: impl FnOnce(&dyn WatcherBackend, SubscriptionId, &Path),
+) -> Result<Vec<(PathBuf, BackendEvent)>, TestErr> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<(PathBuf, BackendEvent)>(0);
     let mut options = BackendOptions::default();
     options.macos.fs_event_stream_latency = Duration::ZERO;
     options.linux.ulimit_strategy = Debug::wrap(UlimitStrategy::panic());
     let test_subscription = subscription_id();
     let had_overflow = Arc::new(AtomicBool::new(false));
-    let backend = Box::new(
-        default_backend(
-            options,
-            Box::new({
-                let had_overflow = had_overflow.clone();
-                let mut tx = Some(tx);
-                move |ctx| {
-                    if matches!(ctx.event, BackendEvent::Overflow) {
-                        had_overflow.store(true, std::sync::atomic::Ordering::Relaxed);
-                        warn!(event = ?ctx.event, path = ?ctx.event_path, "Got Overflow while waiting for test events");
-                        drop(tx.take())
-                    }
-
-                    if ctx.audience.contains(test_subscription) {
-                        if let Some(tx) = tx.as_ref() {
-                            debug!(event_path = ?ctx.event_path, event = ?ctx.event, "sending event");
-                            // rx is converted into an iterator and dropped before the backend is shut down
-                            let _ignore = tx.send((ctx.event_path.to_path_buf(), ctx.event));
-                        }
-                    } else {
-                        trace!(event_path = ?ctx.event_path, event = ?ctx.event, "ignoring irrelevan event");
-                    }
-                }
-            }),
-        )
-        .unwrap(),
-    );
     let vault = files!({});
+    let backend = create_backend(
+        options,
+        Box::new({
+            let had_overflow = had_overflow.clone();
+            let mut tx = Some(tx);
+            move |ctx| {
+                if matches!(ctx.event, BackendEvent::Overflow) {
+                    had_overflow.store(true, std::sync::atomic::Ordering::Relaxed);
+                    warn!(event = ?ctx.event, path = ?ctx.event_path, "Got Overflow while waiting for test events");
+                    drop(tx.take())
+                }
+
+                if ctx.audience.contains(test_subscription) {
+                    if let Some(tx) = tx.as_ref() {
+                        debug!(event_path = ?ctx.event_path, event = ?ctx.event, "sending event");
+                        // Fails once rx is dropped, right before the backend is shut down.
+                        let _ignore = tx.send((ctx.event_path.to_path_buf(), ctx.event));
+                    }
+                } else {
+                    trace!(event_path = ?ctx.event_path, event = ?ctx.event, "ignoring irrelevan event");
+                }
+            }
+        }),
+        vault.path(),
+    );
     let before_latch_path = vault.path().join("latch_before");
     let after_latch_path = vault.path().join("latch_after");
     backend.add_watch(vault.path(), test_subscription, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+    let mut received = timeout_iterator(&rx, RECV_TIMEOUT);
     create(&before_latch_path);
-    body(backend.as_ref(), test_subscription);
+    // Wait for the latch before running the body: a body that changes the event source (see
+    // [`WatcherBackend::set_event_source_paths`]) may discard what has not been delivered yet, the latch included.
+    received
+        .by_ref()
+        .find(|(path, evt)| path.eq(&before_latch_path) && matches!(evt, BackendEvent::RecentlyCreated { .. }));
+    body(backend.as_ref(), test_subscription, vault.path());
     create(&after_latch_path);
 
-    let events = timeout_iterator(&rx, RECV_TIMEOUT)
-        .skip_while(|(path, evt)| {
-            let latch_event = path.eq(&before_latch_path) && matches!(evt, BackendEvent::RecentlyCreated { .. });
-            !latch_event
-        })
-        .skip(1)
+    let events = received
         .take_while(|(path, evt)| {
             let latch_event = path.eq(&after_latch_path) && matches!(evt, BackendEvent::RecentlyCreated { .. });
             !latch_event
         })
         .collect();
+    // The channel is a rendezvous: an event arriving after the latch would block the event loop in `send`, and
+    // `shutdown_and_join` would never return. Disconnecting makes `send` fail instead.
+    drop(rx);
     backend.shutdown_and_join().expect("backend failed to shutdown");
     if had_overflow.load(std::sync::atomic::Ordering::Relaxed) {
         Err(TestErr::Overflow)
@@ -109,7 +122,7 @@ fn create_file() {
 
     retry(|| {
         let dir = files!({});
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             create(dir.path().join("file"));
         })?;
@@ -131,7 +144,7 @@ fn create_directory() {
     enable_logging();
     retry(|| {
         let dir = files!({});
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             create_dir(dir.path().join("dir"));
         })?;
@@ -153,7 +166,7 @@ fn create_symlink() {
     enable_logging();
     retry(|| {
         let dir = files!({ "original" => {} });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             symlink(dir.path().join("original"), dir.path().join("symlink"));
         })?;
@@ -191,7 +204,7 @@ fn remove() {
     enable_logging();
     retry(|| {
         let dir = files!({ "file" => "content" });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             delete(dir.path().join("file"));
         })?;
@@ -205,7 +218,7 @@ fn remove_direct_watch() {
     enable_logging();
     retry(|| {
         let dir = files!({ "target" => {} });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             let target = dir.path().join("target");
             backend.add_watch(&target, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             backend.remove_watch(&target, s, Scope::DirectChildren);
@@ -221,7 +234,7 @@ fn remove_recursive_watch() {
     enable_logging();
     retry(|| {
         let dir = files!({ "target" => { "deep" => {} } });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             let target = dir.path().join("target");
             backend.add_watch(&target, s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
             backend.remove_watch(&target, s, Scope::Recursive);
@@ -237,7 +250,7 @@ fn change_file() {
     enable_logging();
     retry(|| {
         let dir = files!({ "file" => "content" });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             write_all(dir.path().join("file"), "new-content");
         })?;
@@ -297,7 +310,7 @@ fn retarget_symlink() {
     retry(|| {
         let dir = files!({ "root" => { "original" => {}, "new_target" => {} }});
         symlink(dir.path().join("root/original"), dir.path().join("root/symlink"));
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             // The underlying libc call to `symlink` *will not* overwrite an existing file, so retargeting is a two-step process.
             symlink(dir.path().join("root/new_target"), dir.path().join("new_symlink"));
@@ -352,7 +365,7 @@ fn replace_file_with_symlink() {
     enable_logging();
     retry(|| {
         let dir = files!({ "root" => { "original" => {}, "watch_target" => "it is a file" }});
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             // The underlying libc call to `symlink` *will not* overwrite an existing file.
             symlink(dir.path().join("root/original"), dir.path().join("new_symlink"));
@@ -411,7 +424,7 @@ fn replace_directory_with_file() {
     enable_logging();
     retry(|| {
         let dir = files!({ "target" => {} });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             dir.delete("target");
             dir.create("target");
@@ -460,7 +473,7 @@ fn replace_file_with_directory() {
     enable_logging();
     retry(|| {
         let dir = files!({ "target" => "" });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             dir.delete("target");
             dir.create_dir("target");
@@ -508,7 +521,7 @@ fn replace_file_with_directory() {
     enable_logging();
     retry(|| {
         let dir = files!({ "target" => { "file" => "content" }, "dir" => {} });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path().join("target"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             rename(dir.path().join("dir"), dir.path().join("target\\file"));
         })?;
@@ -533,7 +546,7 @@ fn change_file_metadata() {
     enable_logging();
     retry(|| {
         let dir = files!({ "file" => "content" });
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             touch(dir.path().join("file"));
         })?;
@@ -575,7 +588,7 @@ fn change_directory_permissions() {
     retry(|| {
         let dir = files!({ "directory" => {} });
         let dir_path = dir.path().join("directory");
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             set_permissions(&dir_path, 666);
         })?;
@@ -619,7 +632,7 @@ fn removing_directory_destroys_all_watches_inside() {
     enable_logging();
     retry(|| {
         let dir = files!({ "dir" => { "deeply" => { "nested" => { "path" => {} }} }});
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
             backend
                 .add_watch(&dir.path().join("dir/deeply/nested/path"), s, Scope::Recursive, ParentPolicy::Unchecked)
@@ -642,7 +655,7 @@ fn moving_directory_destroys_watches_inside() {
 
     retry(|| {
         let dir = files!({ "dir" => { "deeply" => { "nested" => { "path" => {} }} }});
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
             backend
                 .add_watch(&dir.path().join("dir/deeply/nested/path"), s, Scope::Recursive, ParentPolicy::Unchecked)
@@ -671,7 +684,7 @@ fn write_to_a_file_without_closing_it() {
         let dir = files!({"target" => ""});
         let file_path = dir.path().join("target");
         let mut file_handle = OpenOptions::new().create_new(false).write(true).open(&file_path).unwrap();
-        let events = test(|backend, s| {
+        let events = test(default_backend_factory, |backend, s, _| {
             backend.add_watch(&dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
             file_handle.write_all("new content".as_bytes()).unwrap();
         })?;
@@ -700,7 +713,7 @@ fn require_watched_parent_enforces_contiguous_chain() {
         "direct" => { "a" => { "b" => {} } },
         "recursive" => { "a" => { "b" => { "c" => {} } } },
     });
-    test(|backend, s| {
+    test(default_backend_factory, |backend, s, _| {
         let a = dir.path().join("direct/a");
         let b = dir.path().join("direct/a/b");
 
@@ -735,7 +748,7 @@ fn require_watched_parent_enforces_contiguous_chain() {
 fn watch_root() {
     enable_logging();
     // To track the canonicalization of a path, we should watch all its parents, including the root.
-    test(|backend, s| {
+    test(default_backend_factory, |backend, s, _| {
         let root = if cfg!(windows) { Path::new("C:\\") } else { Path::new("/") };
         backend.add_watch(root, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
         // It would be a bad idea to modify the root contents, and we probably have no rights anyway.
@@ -797,5 +810,141 @@ mod sanity_check {
 
         let result = std::fs::rename(&dir_path, &file_path).map_err(|err| err.kind());
         assert_eq!(result, Ok(()));
+    }
+}
+
+/// [`WatcherBackend::set_event_source_paths`] is only meaningful on macOS, where a single `FSEventStream` is the source of all events.
+///
+/// Every set installed by a body includes the vault, otherwise the latches of [`test`] never arrive.
+/// A switch replays the events under the new set since the last delivered one, so a body never puts an "ignored"
+/// change under a path that a later set adds back.
+#[cfg(target_os = "macos")]
+mod event_source_paths {
+    use std::slice::from_ref;
+
+    use super::*;
+
+    #[test]
+    fn narrows_the_stream() {
+        enable_logging();
+        retry(|| {
+            // Two sibling directories, both watched: the watches stay in place, the stream decides which of them is reported.
+            let dir = files!({ "a" => {}, "b" => {} });
+            let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+            let events = test(default_backend_factory, |backend, s, vault| {
+                backend.add_watch(&a, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+                backend.add_watch(&b, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+
+                // The default stream covers "/"; narrow it down to `a`.
+                backend.set_event_source_paths(&[vault.to_path_buf(), a.clone()]).unwrap();
+
+                // `b` is still watched, but it is outside the stream, so its change must not be reported.
+                create(b.join("ignored"));
+                // `a` is inside, so its change proves that the rebuilt stream is alive.
+                create(a.join("file"));
+            })?;
+            // FSEventStream has a race: a creation may be reported twice (see `change_file`), so any number of the same event is fine.
+            let expected = (
+                a.join("file"),
+                BackendEvent::RecentlyCreated {
+                    file_type: FileType::Regular,
+                },
+            );
+            let eq = !events.is_empty() && events.iter().all(|evt| evt.eq(&expected));
+            assert!(eq, "expected one or more {:#?}, got {:#?}", expected, events);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn initial_paths_are_honoured() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({ "a" => {}, "b" => {} });
+            let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+            let events = test(
+                // The stream starts narrow, instead of the default "/": the vault, so that the latches arrive, and `a`.
+                |options, callback, vault| {
+                    let paths = [vault.to_path_buf(), a.clone()];
+                    Box::new(macos::FSEventStreamBackend::create(&paths, options.macos, callback).unwrap())
+                },
+                |backend, s, _| {
+                    backend.add_watch(&a, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+                    backend.add_watch(&b, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+
+                    // Same as in `narrows_the_stream`, but without any switch: only the initial set decides.
+                    create(b.join("ignored"));
+                    create(a.join("file"));
+                },
+            )?;
+            // FSEventStream has a race: a creation may be reported twice (see `change_file`), so any number of the same event is fine.
+            let expected = (
+                a.join("file"),
+                BackendEvent::RecentlyCreated {
+                    file_type: FileType::Regular,
+                },
+            );
+            let eq = !events.is_empty() && events.iter().all(|evt| evt.eq(&expected));
+            assert!(eq, "expected one or more {:#?}, got {:#?}", expected, events);
+            Ok(())
+        });
+    }
+
+    /// The rebuilt stream resumes from the last event id delivered by the old one, so a change under a newly
+    /// added path that happened before the switch is not lost.
+    #[test]
+    fn events_before_the_switch_are_replayed_for_added_paths() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({ "a" => {} });
+            let a = dir.path().join("a");
+            let events = test(default_backend_factory, |backend, s, vault| {
+                backend.add_watch(&a, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+
+                // Leave `a` out of the stream, then change it: the event is recorded by fseventsd but not delivered.
+                backend.set_event_source_paths(from_ref(&vault.to_path_buf())).unwrap();
+                create(a.join("missed"));
+
+                // Adding `a` back resumes from the last delivered event (the before-latch, or whatever preceded it),
+                // which happened before the change, so the change is replayed.
+                backend.set_event_source_paths(&[vault.to_path_buf(), a.clone()]).unwrap();
+            })?;
+            // FSEventStream has a race: a creation may be reported twice (see `change_file`), so any number of the same event is fine.
+            let expected = (
+                a.join("missed"),
+                BackendEvent::RecentlyCreated {
+                    file_type: FileType::Regular,
+                },
+            );
+            let eq = !events.is_empty() && events.iter().all(|evt| evt.eq(&expected));
+            assert!(eq, "expected one or more {:#?}, got {:#?}", expected, events);
+            Ok(())
+        });
+    }
+
+    /// The contract is "always accept the full set", and the empty set is a legal one: a client that has no roots left must
+    /// not be forced to keep "/" or invent a placeholder. It is an outlier for FSEvents, which refuses to create a stream
+    /// without paths, so the wrapper must handle it instead of handing FSEvents an empty array.
+    #[test]
+    fn an_empty_set_is_accepted() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({ "a" => {} });
+            let a = dir.path().join("a");
+            let events = test(default_backend_factory, |backend, s, vault| {
+                backend.add_watch(&a, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+
+                // The call must succeed; there is no stream at all afterwards.
+                backend.set_event_source_paths(&[]).unwrap();
+                // A set of one path ignores everything else; the empty set ignores everything, this change included.
+                create(a.join("ignored"));
+
+                // The next set must work as usual, which the after-latch proves, and it starts from "now":
+                // the change made during the empty period is not replayed even though `a` is in the set.
+                backend.set_event_source_paths(&[vault.to_path_buf(), a.clone()]).unwrap();
+            })?;
+            assert_eq_pretty!(Vec::<(PathBuf, BackendEvent)>::new(), events);
+            Ok(())
+        });
     }
 }
