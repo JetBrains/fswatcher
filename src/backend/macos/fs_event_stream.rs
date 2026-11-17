@@ -31,7 +31,6 @@ pub struct FSEventStream {
     queue: DispatchRetained<DispatchQueue>,
     latency: Duration,
     flags: FsEventStreamFlags,
-    paths_to_exclude: Vec<PathBuf>,
 }
 
 /// The only API that touches the stream takes `&mut self`, so sharing a reference is safe.
@@ -40,7 +39,6 @@ unsafe impl Sync for FSEventStream {}
 #[instrument(skip_all)]
 pub fn fs_event_stream(
     paths_to_watch: &[PathBuf],
-    paths_to_exclude: &[PathBuf],
     latency: Duration,
     flags: FsEventStreamFlags,
     callback: impl FnMut(thread::Result<Vec<FSEventStreamEvent>>) + Send + 'static,
@@ -49,7 +47,7 @@ pub fn fs_event_stream(
         function: Box::new(callback),
         latest_event_id: AtomicU64::new(NO_EVENT_ID),
     };
-    let mut stream = FSEventStream::new(callback, latency, paths_to_watch, paths_to_exclude, flags)?;
+    let mut stream = FSEventStream::new(callback, latency, paths_to_watch, flags)?;
     stream.start()?;
     Ok(stream)
 }
@@ -96,7 +94,6 @@ impl FSEventStream {
         callback_ctx: CallbackContext,
         latency: Duration,
         paths_to_watch: &[PathBuf],
-        paths_to_exclude: &[PathBuf],
         flags: FsEventStreamFlags,
     ) -> Result<Self, FsEventStreamError> {
         let qos = DispatchQoS::Default;
@@ -112,7 +109,6 @@ impl FSEventStream {
             queue,
             latency,
             flags,
-            paths_to_exclude: paths_to_exclude.to_vec(),
         };
         stream.create(paths_to_watch, kFSEventStreamEventIdSinceNow)?;
         Ok(stream)
@@ -197,17 +193,6 @@ impl FSEventStream {
             if stream_ptr.is_null() {
                 warn!(?paths_to_watch, "FSEventStreamCreate returned NULL");
                 return Err(FsEventStreamError("FSEventStreamCreate has failed"));
-            }
-
-            if !self.paths_to_exclude.is_empty() {
-                let cf_array = cf_array(self.paths_to_exclude.len());
-                for path in &self.paths_to_exclude {
-                    let path_string = path_to_cf_string(path.as_path());
-                    CFArrayAppendValue(cf_array.0, path_string.0);
-                }
-                if !FSEventStreamSetExclusionPaths(stream_ptr, cf_array.0) {
-                    warn!(paths_to_exclude = ?self.paths_to_exclude, "FSEventStreamSetExclusionPaths failed, events will be reported");
-                }
             }
 
             FSEventStreamSetDispatchQueue(stream_ptr, DispatchRetained::as_ptr(&self.queue).as_ptr() as _);
@@ -710,7 +695,6 @@ extern "C" {
     fn FSEventStreamStop(stream_ref: FSEventStreamRef);
     fn FSEventStreamInvalidate(stream_ref: FSEventStreamRef);
     fn FSEventStreamRelease(stream_ref: FSEventStreamRef);
-    fn FSEventStreamSetExclusionPaths(stream_ref: FSEventStreamRef, paths_to_exclude: CFMutableArrayRef) -> bool;
     // The most recently generated event id, across all streams and processes.
     fn FSEventsGetCurrentEventId() -> FSEventStreamEventId;
 }

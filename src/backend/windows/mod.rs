@@ -61,7 +61,7 @@ pub struct WindowsBackend {
 
 impl WindowsBackend {
     pub fn create(options: WindowsOptions, callback: BackendEventHandler) -> Self {
-        let WindowsOptions { muted_paths } = options;
+        let WindowsOptions {} = options;
         let lifetime_def = LifetimeDefinition::new();
         let (io_sender, io_receiver) = mpsc::unbounded();
         let shared = Arc::new(Shared {
@@ -79,7 +79,7 @@ impl WindowsBackend {
                 .name(String::from("fsevents-iocp"))
                 .spawn({
                     let lifetime = lifetime_def.lifetime();
-                    || futures::executor::block_on(event_loop(muted_paths, shared, io_receiver, lifetime, callback))
+                    || futures::executor::block_on(event_loop(shared, io_receiver, lifetime, callback))
                 })
                 .expect("failed to spawn a thread")
         };
@@ -212,7 +212,6 @@ struct DriveId(std::num::NonZeroU32);
 
 struct EventLoopState {
     shared: Arc<Shared>,
-    ignored_paths: Vec<PathBuf>,
     known_removable_drives: HashMap<DeviceId, DrivePrefix>,
     shutdown_requested: bool,
     callback: BackendEventHandler,
@@ -226,7 +225,6 @@ struct Drive {
 
 #[instrument(skip_all)]
 async fn event_loop(
-    ignored_paths: Vec<PathBuf>,
     shared: Arc<Shared>,
     mut io_events: mpsc::UnboundedReceiver<IoMessage>,
     lifetime: Lifetime,
@@ -236,7 +234,6 @@ async fn event_loop(
     let mut device_watcher_events = device_watcher_manager.subscribe().fuse();
     let mut state = EventLoopState {
         shared,
-        ignored_paths,
         known_removable_drives: HashMap::new(),
         shutdown_requested: false,
         callback,
@@ -414,11 +411,7 @@ impl EventLoopState {
                         if subscriptions.is_empty() {
                             None
                         } else {
-                            if self.ignored_paths.iter().any(|ignored| full_file_path.starts_with(ignored)) {
-                                None
-                            } else {
-                                Some(event(full_file_path, Audience::Some(subscriptions), n))
-                            }
+                            Some(event(full_file_path, Audience::Some(subscriptions), n))
                         }
                     })
                     .collect::<Vec<_>>()
