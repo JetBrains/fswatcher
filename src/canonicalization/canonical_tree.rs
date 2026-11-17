@@ -39,10 +39,6 @@ pub enum ChainOutcome {
 }
 
 impl ChainOutcome {
-    pub fn resolved(&self) -> bool {
-        matches!(self, ChainOutcome::Resolved { .. })
-    }
-
     pub fn into_canonical_path(self) -> Option<PathBuf> {
         match self {
             ChainOutcome::Resolved { canonical_path } => Some(canonical_path),

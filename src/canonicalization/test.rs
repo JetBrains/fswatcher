@@ -247,7 +247,7 @@ fn handle_overflow() {
         |io| t.handle_event(path!("1", "2").as_path(), BackendEvent::Overflow, io),
         vec![Read(path!("1", "2"), Directory), Read(path!("1", "2", "3"), Directory)],
     );
-    assert_eq!(vec![(key, CanonicalizationUpdate::Resolved)], sorted_updates(changes));
+    assert_eq!(vec![(key, CanonicalizationUpdate::Unchanged)], sorted_updates(changes));
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn overflow_on_root_rescans_everything() {
     let key = expect_commands(|io| t.register(path!("1", "2", "3"), MissingPolicy::Track, io).unwrap().key, expectations.clone());
 
     let updates = expect_commands(|io| t.handle_event(Path::new("/"), BackendEvent::Overflow, io), expectations);
-    assert_eq!(vec![(key, CanonicalizationUpdate::Resolved)], sorted_updates(updates));
+    assert_eq!(vec![(key, CanonicalizationUpdate::Unchanged)], sorted_updates(updates));
 }
 
 #[test]
@@ -1240,5 +1240,5 @@ fn overflow_with_symlink() {
     let key = expect_commands(|io| t.register(target_path.clone(), MissingPolicy::Track, io).unwrap().key, expectations.clone());
     debug!("emulate overflow on root");
     let updates = expect_commands(|io| t.handle_event(&root!(), BackendEvent::Overflow, io), expectations);
-    assert_eq!(vec![(key, CanonicalizationUpdate::Resolved)], sorted_updates(updates));
+    assert_eq!(vec![(key, CanonicalizationUpdate::Unchanged)], sorted_updates(updates));
 }
