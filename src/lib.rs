@@ -183,9 +183,14 @@ impl Watcher {
     /// `FSEventStream` covers everything, and this narrows or widens it), the other platforms do nothing here.
     /// See [`WatcherBackend::set_event_source_paths`].
     ///
-    /// Watches outside the set currently stay registered but receive nothing, the ones the canonicalization keeps on the
-    /// ancestors of a root included. This is subject to change: a change above a root must not go unnoticed, and how the
-    /// canonicalization is told about it has not been decided yet.
+    /// A change above one of `canonical_paths` is not lost: the macOS backend is created with
+    /// `kFSEventStreamCreateFlagWatchRoot`, so it arrives as an ambiguous event on the path itself, which the session
+    /// turns into a single [`Event::Rescan`] for every root canonicalized there.
+    ///
+    /// Watches outside the set, however, stay registered and silently receive nothing, the ones the canonicalization
+    /// keeps on the ancestors of a root included. This is a known gap, not a feature: such watches should be cleaned
+    /// up when the set shrinks, and an attempt to establish a watch outside of the current set should fail with an
+    /// error the client can see, instead of succeeding and never firing. Neither is implemented yet.
     pub fn set_event_source_paths(&self, canonical_paths: &[PathBuf]) -> anyhow::Result<()> {
         self.backend
             .set_event_source_paths(canonical_paths)

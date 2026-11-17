@@ -130,21 +130,7 @@ impl<'a> WatchSessionTx<'a> {
 
         // Subscribe to the canonical target automatically.
         if let Some(canonical) = canonical_path {
-            self.inner
-                .watcher
-                .backend
-                .add_watch(&canonical, subscription_id, scope, ParentPolicy::Unchecked)
-                .ok()
-                .or_else(|| {
-                    // If the target is a file rather than a directory, watch the parent instead.
-                    canonical.parent().and_then(|parent| {
-                        self.inner
-                            .watcher
-                            .backend
-                            .add_watch(parent, subscription_id, Scope::DirectChildren, ParentPolicy::Unchecked)
-                            .ok()
-                    })
-                });
+            subscribe_to_canonical(self.inner.watcher.backend.as_ref(), &canonical, subscription_id, scope);
         }
     }
 
@@ -281,21 +267,7 @@ impl<'a> WatchSessionTx<'a> {
 
         // Subscribe to the canonical target automatically.
         if let Some(canonical) = canonical_path {
-            self.inner
-                .watcher
-                .backend
-                .add_watch(&canonical, subscription_id, scope, ParentPolicy::Unchecked)
-                .ok()
-                .or_else(|| {
-                    // If the target is a file rather than a directory, watch the parent instead.
-                    canonical.parent().and_then(|parent| {
-                        self.inner
-                            .watcher
-                            .backend
-                            .add_watch(parent, subscription_id, Scope::DirectChildren, ParentPolicy::Unchecked)
-                            .ok()
-                    })
-                });
+            subscribe_to_canonical(self.inner.watcher.backend.as_ref(), &canonical, subscription_id, scope);
         }
 
         Ok(())
@@ -511,7 +483,10 @@ impl SessionState {
 
         self.tracker.collect_aliases(&event.event_path, |symbolic_prefix, sym_key, suffix| {
             if let Some(&(subscription_id, _)) = self.symbolic_paths.get(&sym_key) {
-                let canonicalization_changed = canonicalization_updates.contains_key(&sym_key);
+                // Never two events for one key. A key whose canonicalization changed is notified below, with
+                // `Rescan` or `Removed`, so the plain event is withheld here. A key whose canonicalization is
+                // unchanged is notified here only, the same way as any other alias.
+                let canonicalization_changed = canonicalization_updates.get(&sym_key).is_some_and(|u| u.is_change());
                 trace!(?canonicalization_changed, ?subscription_id, "root considers event");
                 if !canonicalization_changed && event.audience.contains(subscription_id) {
                     let symbolic_path = symbolic_prefix.join(suffix);
@@ -532,25 +507,113 @@ impl SessionState {
 
         trace!(?canonicalization_updates, "delivering canonicalization updates");
 
-        // Snapshot (key, path) up front to avoid borrowing `self.tracker` while mutating the tree.
-        let affected_paths: Vec<(SymbolicKey, PathBuf)> = canonicalization_updates
+        // The updated keys with their symbolic path and their canonical path as it is *after* the update (the tracker
+        // has already applied it), `None` if the path no longer resolves. Snapshotted up front to avoid borrowing
+        // `self.tracker` while the symbolic tree is being pruned below.
+        let updated_keys: Vec<(SymbolicKey, PathBuf, Option<PathBuf>)> = canonicalization_updates
             .keys()
-            .filter_map(|&sk| self.tracker.remind(sk).map(|p| (sk, p.to_path_buf())))
+            .filter_map(|&sym_key| {
+                let sym_path = self.tracker.remind(sym_key)?.to_path_buf();
+                let canonical = self.tracker.canonicalization(&sym_path).ok();
+                Some((sym_key, sym_path, canonical))
+            })
             .collect();
 
-        for (sym_key, sym_path) in affected_paths {
-            // Prune top-level keys; dominated descendants are covered by their ancestor.
-            let top_level_prune = self.symbolic_tree.prune(
-                &sym_path,
-                |v| !canonicalization_updates.contains_key(v),
-                |v| !self.root_keys.contains(v) && !v.eq(&sym_key),
-            );
-            let top_level = top_level_prune.is_some();
-            if let Some(pruned) = top_level_prune {
-                for pruned_key in &pruned {
-                    if *pruned_key == sym_key {
-                        continue;
+        // The keys that rescan: their client forgets everything under the symbolic path and re-registers it, so the
+        // session must forget the non-root registrations below as well, or they outlive what the client knows about.
+        // A changed canonicalization always rescans (or removes). An unchanged one rescans only when the trigger
+        // concerns the canonical target itself or something above it: the client has received (or is about to
+        // receive) a `Rescan` for this very path. A re-read symlink that still points where it did rescans nothing.
+        let must_rescan: HashSet<SymbolicKey> = updated_keys
+            .iter()
+            .filter(|(sym_key, _, canonical)| match canonicalization_updates[sym_key] {
+                CanonicalizationUpdate::Resolved | CanonicalizationUpdate::Broken => true,
+                CanonicalizationUpdate::Unchanged => {
+                    // A removal cannot leave a canonicalization unchanged, and a change of a single entry affects
+                    // nothing but the mapping that was re-read.
+                    let subtree_event = matches!(event.event, BackendEvent::Overflow | BackendEvent::Ambiguous);
+                    subtree_event && canonical.as_deref().is_some_and(|c| c.starts_with(&event.event_path))
+                }
+            })
+            .map(|(sym_key, _, _)| *sym_key)
+            .collect();
+
+        // Apply the canonicalization updates to the session
+        for (sym_key, sym_path, canonical) in updated_keys {
+            let update = &canonicalization_updates[&sym_key];
+            if must_rescan.contains(&sym_key) {
+                // forget the registrations the client is about to re-register
+                let covered_by_ancestor = self.forget_below(sym_key, &sym_path, &must_rescan, watcher);
+                if covered_by_ancestor {
+                    // The ancestor's `Rescan` or `Removed` covers this key, which has just been forgotten with it.
+                } else if let Some(&(subscription_id, scope)) = self.symbolic_paths.get(&sym_key) {
+                    // Whatever the outcome, the previous canonical subscriptions are obsolete: the client forgets this subtree.
+                    watcher.backend.destroy_subscription(subscription_id);
+                    match update {
+                        CanonicalizationUpdate::Resolved => match &canonical {
+                            Some(canonical) => {
+                                // A target appeared or the path leads to a new one. Re-subscribe and send Rescan so the client can traverse it.
+                                subscribe_to_canonical(watcher.backend.as_ref(), canonical, subscription_id, scope);
+                                trace!(?sym_path, "target appeared or changed, send rescan");
+                                events.push(Event::Rescan { path: sym_path.clone() });
+                            }
+                            None => {
+                                // Retargeted and unresolvable. Send Rescan just in case.
+                                warn!(
+                                    ?sym_key,
+                                    "received CanonicalizationUpdate::Resolved for path, but canonicalization failed"
+                                );
+                                events.push(Event::Rescan { path: sym_path.clone() });
+                            }
+                        },
+                        CanonicalizationUpdate::Broken => {
+                            events.push(Event::Removed { path: sym_path.clone() });
+                        }
+                        CanonicalizationUpdate::Unchanged => {
+                            let canonical = canonical.as_deref().expect("a key that must rescan has a canonical path");
+                            subscribe_to_canonical(watcher.backend.as_ref(), canonical, subscription_id, scope);
+                            if canonical == event.event_path {
+                                // The event hit the canonical target itself and alias routing delivered the rescan above.
+                            } else {
+                                // Canonicalized strictly below the overflown or ambiguous path: neither the backend nor alias
+                                // routing addressed this key, so the canonicalization relays the rescan.
+                                trace!(?sym_path, "canonicalized under an overflown or ambiguous path, relaying rescan");
+                                events.push(Event::Rescan { path: sym_path.clone() });
+                            }
+                        }
                     }
+                }
+            } else {
+                // The path leads where it led before and nothing is being rescanned. What is behind it may still be a
+                // different entry, but that is what the triggering event says, and it was delivered above if it
+                // concerned this key; nothing is reported on behalf of the canonicalization. The canonicalization has
+                // re-established its own watches along the chain, make sure the subscriber's one is in place too.
+                debug_assert!(matches!(update, CanonicalizationUpdate::Unchanged));
+                if let (Some(&(subscription_id, scope)), Some(canonical)) = (self.symbolic_paths.get(&sym_key), &canonical) {
+                    trace!(?sym_path, ?canonical, "canonicalization unchanged, restoring the watch");
+                    subscribe_to_canonical(watcher.backend.as_ref(), canonical, subscription_id, scope);
+                }
+            }
+        }
+        events
+    }
+
+    /// The client is about to forget everything under `sym_path` and re-register it (or has received `Removed` for it),
+    /// so the session forgets the non-root registrations below as well: their subscriptions are destroyed and the
+    /// tracker stops following them. The key itself and the roots below stay.
+    ///
+    /// Returns `true` if an ancestor in `must_rescan` covers this key: it is pruned by the ancestor in the same way,
+    /// its client is about to re-register it, and no event must be sent for it. A root is never covered: the client
+    /// registered it on its own and expects its own event, see `rescan_delievered_on_each_registered_root`.
+    fn forget_below(&mut self, sym_key: SymbolicKey, sym_path: &Path, must_rescan: &HashSet<SymbolicKey>, watcher: &Watcher) -> bool {
+        let pruned = self.symbolic_tree.prune(
+            sym_path,
+            |ancestor| !must_rescan.contains(ancestor),
+            |below| !self.root_keys.contains(below) && !below.eq(&sym_key),
+        );
+        match pruned {
+            Some(pruned) => {
+                for pruned_key in pruned.iter().filter(|key| **key != sym_key) {
                     if let Some((subscription_id, _)) = self.symbolic_paths.remove(pruned_key) {
                         watcher.destroy_subscription(subscription_id);
                     }
@@ -559,59 +622,25 @@ impl SessionState {
                         &mut real_io(watcher.backend.as_ref(), self.canonicalization_subscription_id),
                     );
                 }
+                false
             }
-            if top_level {
-                // TODO see rescan_delievered_on_each_registered_root
-                // || self.root_keys.contains(&sym_key) {
-                // Send event for this key itself
-                if let Some(&(subscription_id, scope)) = self.symbolic_paths.get(&sym_key) {
-                    // Whether it is resolved now or not, all the previous canonical subscriptions are obsolete.
-                    watcher.backend.destroy_subscription(subscription_id);
-                    match &canonicalization_updates[&sym_key] {
-                        CanonicalizationUpdate::Resolved => {
-                            // If the triggering event resolved the canonical target, try to re-subscribe
-                            match self.tracker.canonicalization(&sym_path) {
-                                Ok(canonical) => {
-                                    let direct = watcher
-                                        .backend
-                                        .as_ref()
-                                        .add_watch(&canonical, subscription_id, scope, ParentPolicy::Unchecked)
-                                        .is_ok();
-                                    if direct {
-                                        // A directory target appeared and we re-subscribed. Send Rescan so the client can traverse it.
-                                    } else {
-                                        // Not a directory. Try watching the parent (the file symlink case).
-                                        if let Some(canonical_parent) = canonical.parent() {
-                                            let _ = watcher.backend.add_watch(
-                                                canonical_parent,
-                                                subscription_id,
-                                                Scope::DirectChildren,
-                                                ParentPolicy::Unchecked,
-                                            );
-                                        }
-                                    }
-                                    trace!(?sym_path, "target appeared, send rescan");
-                                    events.push(Event::Rescan { path: sym_path.clone() });
-                                }
-                                Err(err) => {
-                                    // Retargeted and unresolvable. Send Rescan just in case.
-                                    warn!(
-                                        ?sym_key,
-                                        ?err,
-                                        "received CanonicalizationUpdate::Resolved for path, but canonicalization failed"
-                                    );
-                                    events.push(Event::Rescan { path: sym_path.clone() });
-                                }
-                            }
-                        }
-                        CanonicalizationUpdate::Broken => {
-                            events.push(Event::Removed { path: sym_path.clone() });
-                        }
-                    }
-                };
-            }
+            None => !self.root_keys.contains(&sym_key),
         }
-        events
+    }
+}
+
+/// Watches the canonical target on behalf of `subscription_id`.
+/// If the target is a file rather than a directory, its parent is watched instead, so that the file's own changes are still observed.
+/// Idempotent, like `add_watch`.
+fn subscribe_to_canonical(backend: &dyn WatcherBackend, canonical: &Path, subscription_id: SubscriptionId, scope: Scope) {
+    let direct = backend
+        .add_watch(canonical, subscription_id, scope, ParentPolicy::Unchecked)
+        .is_ok();
+    if !direct {
+        // If the target is a file rather than a directory, watch the parent instead.
+        if let Some(parent) = canonical.parent() {
+            let _ = backend.add_watch(parent, subscription_id, Scope::DirectChildren, ParentPolicy::Unchecked);
+        }
     }
 }
 

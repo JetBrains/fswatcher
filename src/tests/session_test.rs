@@ -976,9 +976,9 @@ fn detached_watch_directory_is_rejected() {
     })
 }
 
-#[allow(dead_code)]
+#[test]
 fn rescan_delievered_on_each_registered_root() {
-    // enable when session::handle_event is fixed
+    // Every root is registered on its own, so every root hears about an overflow above it, nested ones included.
     let dir = files!({
         "dir1" => {},
         "dir2" => {
@@ -1010,5 +1010,79 @@ fn rescan_delievered_on_each_registered_root() {
         .collect::<HashSet<_>>();
         let actual = vec![evt1, evt2, evt3].into_iter().collect::<HashSet<_>>();
         assert_eq_pretty!(expected, actual);
+    })
+}
+
+/// A symlink is replaced by one pointing at the same target. The canonicalization re-expands the chain and lands
+/// where it was, so the client only hears about the link itself; a `Rescan` would make it re-read a tree that is
+/// exactly as it knows it. The watch on the target survives, so changes behind the link keep arriving.
+#[test]
+fn symlink_recreated_with_the_same_target_does_not_rescan() {
+    let dir = files!({
+        "root" => { /* symlink to ../dir here */ },
+        "dir" => { "file" => "" },
+    });
+    let symlink_path = dir.path().join("root/symlink");
+    symlink(Path::new("../dir"), &symlink_path);
+    test(|fake, watcher| {
+        let mut session = watcher.session();
+        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
+
+        // re-create the link with the very same target, as e.g. a package manager does on reinstall
+        delete(&symlink_path);
+        symlink(Path::new("../dir"), &symlink_path);
+        fake.emulate_symlink_changed(&symlink_path);
+        // the root sees its child change, but nothing behind the link is stale
+        expect_changed_symlink!(&mut session, &symlink_path);
+        expect_nothing!(&mut session);
+
+        // the target is still watched through the link
+        fake.emulate_file_changed(dir.path().join("dir/file"));
+        expect_changed_file!(&mut session, symlink_path.join("file"));
+        expect_nothing!(&mut session);
+    })
+}
+
+/// Emulates what `kFSEventStreamCreateFlagWatchRoot` produces when something above a watched root changes (the macOS
+/// backend reports it as `Ambiguous` on the root itself): the client must get exactly one `Rescan`, and the root must
+/// stay watched afterwards even though the backend tore its watches down together with the ambiguous path.
+#[test]
+fn root_changed_on_an_unchanged_root_rescans_once_and_keeps_it_watched() {
+    let dir = files!({ "parent" => { "root" => { "file" => "content" } } });
+    let root_path = dir.path().join("parent/root");
+    test(|fake, watcher| {
+        let mut session = watcher.session();
+        session.watch_root(&root_path, Scope::DirectChildren);
+
+        fake.emulate_event(&root_path, BackendEvent::Ambiguous);
+        expect_rescan!(&mut session, root_path);
+        expect_nothing!(&mut session);
+
+        // the backend wiped the watches under the root; the session has put the root's own back
+        fake.emulate_file_changed(root_path.join("file"));
+        expect_changed_file!(&mut session, root_path.join("file"));
+        expect_nothing!(&mut session);
+    })
+}
+
+/// Same as above, but the root is reached through a symlink: the root-changed signal arrives on the canonical path,
+/// and the aliasing root is still told exactly once.
+#[test]
+fn root_changed_on_an_unchanged_symlinked_root_rescans_once() {
+    let dir = files!({ "canonical" => { "file" => "content" } });
+    let link = dir.path().join("link");
+    symlink(dir.path().join("canonical"), &link);
+    test(|fake, watcher| {
+        let mut session = watcher.session();
+        session.watch_root(&link, Scope::DirectChildren);
+
+        fake.emulate_event(dir.path().join("canonical"), BackendEvent::Ambiguous);
+        expect_rescan!(&mut session, link);
+        expect_nothing!(&mut session);
+
+        fake.emulate_file_changed(dir.path().join("canonical/file"));
+        expect_changed_file!(&mut session, link.join("file"));
+        expect_nothing!(&mut session);
     })
 }

@@ -17,8 +17,8 @@ use tracing::{instrument, trace, trace_span};
 use super::backend::{BackendError, BackendEvent};
 use crate::util::id_source::IdSource;
 
-pub use canonical_tree::{SymbolicKey, WatchHandle};
 use canonical_tree::*;
+pub use canonical_tree::{SymbolicKey, WatchHandle};
 use cycles::CycleDetection;
 pub use read_link::{read_link, ReadLink};
 
@@ -29,8 +29,17 @@ pub use read_link::{read_link, ReadLink};
 #[derive(Debug)]
 pub struct Tracker {
     key_source: IdSource,
-    registered_paths: HashMap<SymbolicKey, PathBuf>,
+    registered_paths: HashMap<SymbolicKey, RegisteredPath>,
     tree: CanonicalTree,
+}
+
+/// What the tracker knows about a registered symbolic path.
+#[derive(Debug)]
+struct RegisteredPath {
+    symbolic_path: PathBuf,
+    /// The canonical target the path resolved to the last time it was expanded, `None` while it is unresolved.
+    /// Remembered to tell a genuine retargeting apart from a re-expansion that lands on the same target.
+    canonical_path: Option<PathBuf>,
 }
 
 impl Tracker {
@@ -43,7 +52,7 @@ impl Tracker {
     }
 
     pub fn remind(&self, path_key: SymbolicKey) -> Option<&Path> {
-        self.registered_paths.get(&path_key).map(|pb| pb.as_path())
+        self.registered_paths.get(&path_key).map(|r| r.symbolic_path.as_path())
     }
 
     /// Registers a symbolic path and starts monitoring its canonicalization.
@@ -68,16 +77,23 @@ impl Tracker {
             self.tree.remove_key(path_key, &symbolic_path, io);
             return None;
         }
-        self.registered_paths.insert(path_key, symbolic_path);
+        let canonical_path = outcome.into_canonical_path();
+        self.registered_paths.insert(
+            path_key,
+            RegisteredPath {
+                symbolic_path,
+                canonical_path: canonical_path.clone(),
+            },
+        );
         Some(Registered {
             key: path_key,
-            canonical_path: outcome.into_canonical_path(),
+            canonical_path,
         })
     }
 
     pub fn unregister(&mut self, path_key: SymbolicKey, io: &mut dyn CanonicalizationIO) {
-        let symbolic_path = self.registered_paths.remove(&path_key);
-        if let Some(symbolic_path) = symbolic_path {
+        let registration = self.registered_paths.remove(&path_key);
+        if let Some(RegisteredPath { symbolic_path, .. }) = registration {
             let _span = trace_span!("unregister", ?path_key, ?symbolic_path).entered();
             self.tree.remove_key(path_key, &symbolic_path, io);
         }
@@ -120,7 +136,11 @@ impl Tracker {
     pub fn collect_aliases(&self, canonical_path: &Path, mut consumer: impl FnMut(&Path, SymbolicKey, &Path)) {
         trace!("collect_aliases");
         self.tree.collect_aliases(canonical_path, &mut |path_key, suffix| {
-            consumer(self.registered_paths.get(&path_key).expect("unknown path_key"), path_key, suffix)
+            consumer(
+                &self.registered_paths.get(&path_key).expect("unknown path_key").symbolic_path,
+                path_key,
+                suffix,
+            )
         });
     }
 
@@ -140,12 +160,13 @@ impl Tracker {
         trace!(?entry, "resolution result");
         match event {
             BackendEvent::Removed => match entry {
-                Some(Canonical::Resolved(entry) | Canonical::Unresolved(entry)) => entry
-                    .replace_with_missing(io)
-                    .broken
-                    .into_iter()
-                    .map(|key| (key, CanonicalizationUpdate::Broken))
-                    .collect(),
+                Some(Canonical::Resolved(entry) | Canonical::Unresolved(entry)) => {
+                    let broken = entry.replace_with_missing(io).broken;
+                    for key in &broken {
+                        self.registered_paths.get_mut(key).expect("unknown path_key").canonical_path = None;
+                    }
+                    broken.into_iter().map(|key| (key, CanonicalizationUpdate::Broken)).collect()
+                }
                 None => HashMap::new(),
             },
             BackendEvent::Ambiguous | BackendEvent::Overflow | BackendEvent::Changed { .. } | BackendEvent::RecentlyCreated { .. } => {
@@ -179,8 +200,26 @@ impl Tracker {
                 let mut updates: HashMap<SymbolicKey, CanonicalizationUpdate> =
                     broken.into_iter().map(|key| (key, CanonicalizationUpdate::Broken)).collect();
                 for path_key in all.into_iter() {
-                    if self.tree.expand_symlink_chain(path_key, &self.registered_paths[&path_key], io).resolved() {
-                        updates.insert(path_key, CanonicalizationUpdate::Resolved);
+                    let registration = self.registered_paths.get_mut(&path_key).expect("unknown path_key");
+                    let outcome = self.tree.expand_symlink_chain(path_key, &registration.symbolic_path, io);
+                    let previous = std::mem::replace(&mut registration.canonical_path, outcome.into_canonical_path());
+                    match (&previous, &registration.canonical_path) {
+                        (Some(previous), Some(current)) if previous == current => {
+                            // The chain was torn down and rebuilt, but it leads where it led before.
+                            // A transient `Broken` recorded above is superseded: the alias is back in place.
+                            updates.insert(path_key, CanonicalizationUpdate::Unchanged);
+                        }
+                        (_, Some(_)) => {
+                            updates.insert(path_key, CanonicalizationUpdate::Resolved);
+                        }
+                        (_, None) => {
+                            // Still (or newly) unresolved. If it used to resolve, `broken` already reports it.
+                        }
+                    }
+                }
+                for (path_key, update) in &updates {
+                    if matches!(update, CanonicalizationUpdate::Broken) {
+                        self.registered_paths.get_mut(path_key).expect("unknown path_key").canonical_path = None;
                     }
                 }
                 updates
@@ -207,11 +246,35 @@ impl Default for Tracker {
     }
 }
 
+/// How an event changed the canonicalization of a registered symbolic path.
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub enum CanonicalizationUpdate {
-    Resolved, // maybe to a different target
+    /// The path resolves to a canonical target it did not resolve to before: it was unresolved
+    /// (missing or dangling) or it pointed elsewhere. Whatever the client knew about it is stale.
+    Resolved,
+    /// The chain was re-expanded and leads to the very same canonical path as before.
+    ///
+    /// This is a statement about the mapping only, not about what is behind it: the entry at that
+    /// path may well be a different one (a directory moved out and another moved in under the same
+    /// name). Whether the client's picture is stale is for the triggering event to tell, and it is
+    /// delivered to the subscriber by the ordinary routing, since the path still denotes the same
+    /// place. What this update does ask of the subscriber is to make sure its own watch on the
+    /// target is still in place: the watches along the chain had to be re-established.
+    Unchanged,
+    /// The path no longer resolves to anything.
     Broken,
+}
+
+impl CanonicalizationUpdate {
+    /// Whether the symbolic path now maps to a different canonical path than before (or to none).
+    /// `false` does not mean that the entry behind the path is the same one.
+    pub fn is_change(&self) -> bool {
+        match self {
+            CanonicalizationUpdate::Resolved | CanonicalizationUpdate::Broken => true,
+            CanonicalizationUpdate::Unchanged => false,
+        }
+    }
 }
 
 /// Result of a successful [`Tracker::register`].

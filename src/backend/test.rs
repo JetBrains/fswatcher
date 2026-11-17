@@ -1007,11 +1007,15 @@ mod event_source_paths {
 mod watch_root {
     use super::*;
 
-    /// a factory that builds a backend with [`macos::FsEventStreamFlags::WATCH_ROOT`] enabled
+    /// a factory that builds a backend over the vault and `watched`; [`macos::FsEventStreamFlags::WATCH_ROOT`] is part of the default flags
     fn watch_root_backend_factory(watched: PathBuf) -> impl FnOnce(BackendOptions, BackendEventHandler, &Path) -> Box<dyn WatcherBackend> {
         move |options, callback, vault| {
             let paths = [vault.to_path_buf(), watched];
-            let flags = macos::FsEventStreamFlags::default() | macos::FsEventStreamFlags::WATCH_ROOT;
+            let flags = macos::FsEventStreamFlags::default();
+            assert!(
+                flags.contains(macos::FsEventStreamFlags::WATCH_ROOT),
+                "the flag under test is expected to be on by default"
+            );
             Box::new(macos::FSEventStreamBackend::create(&paths, flags, options.macos, callback).unwrap())
         }
     }

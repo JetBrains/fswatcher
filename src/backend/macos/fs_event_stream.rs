@@ -76,7 +76,7 @@ bitflags::bitflags! {
 
 impl Default for FsEventStreamFlags {
     fn default() -> Self {
-        Self::FILE_EVENTS | Self::NO_DEFER
+        Self::FILE_EVENTS | Self::NO_DEFER | Self::WATCH_ROOT
     }
 }
 
