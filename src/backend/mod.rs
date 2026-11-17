@@ -16,7 +16,7 @@ mod test;
 
 use std::{
     collections::HashSet,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub use error::BackendError;
@@ -91,6 +91,19 @@ pub trait WatcherBackend {
     /// Because it is invoked on the drop of a subscription, the implementation must never panic.
     fn destroy_subscription(&self, subscription_id: SubscriptionId);
 
+    /// Replaces the set of paths the backend receives events for with `canonical_paths`.
+    ///
+    /// The set is accepted as is: it fully replaces the previous one, and the paths are assumed to be canonical.
+    /// Watches registered with [`WatcherBackend::add_watch`] stay registered, but only those under one of `canonical_paths` receive events.
+    ///
+    /// Only the macOS backend has such a notion: a single `FSEventStream` covers everything, and this call narrows (or widens) it
+    /// (see `macos::FSEventStreamBackend`). An empty set is accepted and silences the backend until the next call; what happens in between is not reported later.
+    /// The other backends watch exactly what they were asked to and do nothing here.
+    fn set_event_source_paths(&self, canonical_paths: &[PathBuf]) -> Result<(), BackendError> {
+        let _ = canonical_paths;
+        Ok(())
+    }
+
     fn shutdown_and_join(self: Box<Self>) -> std::thread::Result<()>;
 }
 
@@ -151,7 +164,11 @@ pub type BackendEventHandler = Box<dyn for<'a> FnMut(BackendEventContext<'a>) + 
 pub fn default_backend(options: BackendOptions, callback_fn: BackendEventHandler) -> anyhow::Result<impl WatcherBackend> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(macos::FSEventStreamBackend::create(options.macos, callback_fn)?);
+        return Ok(macos::FSEventStreamBackend::create(
+            &[PathBuf::from("/")],
+            options.macos,
+            callback_fn,
+        )?);
     }
     #[cfg(target_os = "linux")]
     {

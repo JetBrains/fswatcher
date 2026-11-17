@@ -26,11 +26,13 @@ use fs_event_stream::{fs_event_stream, FSEventStream, FSEventStreamEvent, FsEven
 pub struct FSEventStreamBackend {
     thread_handle: thread::JoinHandle<()>,
     shared: Arc<Shared>,
-    fs_event_stream: FSEventStream,
+    fs_event_stream: Mutex<FSEventStream>,
 }
 
 impl FSEventStreamBackend {
-    pub fn create(options: MacosOptions, callback: BackendEventHandler) -> Result<Self, FsEventStreamError> {
+    /// `paths_to_watch` is the initial set of canonical paths the `FSEventStream` covers; it can be replaced later
+    /// with [`WatcherBackend::set_event_source_paths`].
+    pub fn create(paths_to_watch: &[PathBuf], options: MacosOptions, callback: BackendEventHandler) -> Result<Self, FsEventStreamError> {
         let (events_tx, events_rx) = mpsc::unbounded::<thread::Result<Vec<FSEventStreamEvent>>>();
         let MacosOptions {
             fs_event_stream_latency,
@@ -38,7 +40,7 @@ impl FSEventStreamBackend {
             muted_paths,
         } = options;
         let fs_event_stream = fs_event_stream(
-            &[PathBuf::from("/")],
+            paths_to_watch,
             &[],
             fs_event_stream_latency,
             FsEventStreamFlags::default(),
@@ -68,7 +70,7 @@ impl FSEventStreamBackend {
         Ok(FSEventStreamBackend {
             thread_handle,
             shared: shared_impl,
-            fs_event_stream,
+            fs_event_stream: Mutex::new(fs_event_stream),
         })
     }
 }
@@ -139,6 +141,17 @@ impl WatcherBackend for FSEventStreamBackend {
 
     fn destroy_subscription(&self, subscription: SubscriptionId) {
         self.shared.destroy_subscription(subscription);
+    }
+
+    /// Rebuilds the `FSEventStream` for `canonical_paths`, see [`FSEventStream::set_paths`].
+    /// The registered watches are untouched.
+    #[instrument(level = "debug", skip(self))]
+    fn set_event_source_paths(&self, canonical_paths: &[PathBuf]) -> Result<(), BackendError> {
+        self.fs_event_stream
+            .lock()
+            .expect("mutex is poisoned")
+            .set_paths(canonical_paths)
+            .map_err(|err| BackendError::IO(std::io::Error::other(err)))
     }
 
     fn shutdown_and_join(self: Box<Self>) -> std::thread::Result<()> {
