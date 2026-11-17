@@ -51,10 +51,7 @@ pub struct INotifyBackend {
 
 impl INotifyBackend {
     pub fn create(options: LinuxOptions, callback_fn: BackendEventHandler) -> io::Result<Self> {
-        let LinuxOptions {
-            ulimit_strategy,
-            muted_paths: ignored_paths,
-        } = options;
+        let LinuxOptions { ulimit_strategy } = options;
         let lifetime_def = LifetimeDefinition::new();
         let inotify = Inotify::init()?;
         let watches = inotify.watches();
@@ -73,14 +70,7 @@ impl INotifyBackend {
                         .enable_all()
                         .build()
                         .expect("failed to instantiate tokio runtime");
-                    rt.block_on(event_loop(
-                        inotify,
-                        callback_fn,
-                        shared,
-                        lifetime,
-                        ignored_paths,
-                        ulimit_strategy.into_inner(),
-                    ))
+                    rt.block_on(event_loop(inotify, callback_fn, shared, lifetime, ulimit_strategy.into_inner()))
                 })
                 .expect("failed to spawn a thread")
         };
@@ -248,7 +238,6 @@ async fn event_loop(
     mut callback: BackendEventHandler,
     shared: Arc<Shared>,
     lifetime: Lifetime,
-    ignored_paths: Vec<PathBuf>,
     _ulimit_handler: UlimitStrategy,
 ) {
     enum LoopEvent {
@@ -310,10 +299,6 @@ async fn event_loop(
                         }
 
                         let _span = trace_span!("event", ?event_path, ?raw).entered();
-                        if ignored_paths.iter().any(|ignored| event_path.starts_with(ignored)) {
-                            trace!("skip ignored path");
-                            continue;
-                        }
                         let is_dir = raw.mask.contains(EventMask::ISDIR);
                         let created = raw.mask.contains(EventMask::CREATE) || raw.mask.contains(EventMask::MOVED_TO);
                         let modified = raw.mask.contains(EventMask::MODIFY) || raw.mask.contains(EventMask::ATTRIB);

@@ -45,9 +45,8 @@ impl FSEventStreamBackend {
         let MacosOptions {
             fs_event_stream_latency,
             report_rescan,
-            muted_paths,
         } = options;
-        let fs_event_stream = fs_event_stream(paths_to_watch, &[], fs_event_stream_latency, flags, move |events| {
+        let fs_event_stream = fs_event_stream(paths_to_watch, fs_event_stream_latency, flags, move |events| {
             let _ = events_tx.unbounded_send(events);
         })?;
         let shared_impl = Arc::new(Shared {
@@ -57,15 +56,7 @@ impl FSEventStreamBackend {
             let shared_impl = shared_impl.clone();
             thread::Builder::new()
                 .name(String::from("fsevents-event-loop"))
-                .spawn(|| {
-                    futures::executor::block_on(event_loop(
-                        callback,
-                        report_rescan.map(Debug::into_inner),
-                        muted_paths,
-                        shared_impl,
-                        events_rx,
-                    ))
-                })
+                .spawn(|| futures::executor::block_on(event_loop(callback, report_rescan.map(Debug::into_inner), shared_impl, events_rx)))
                 .expect("failed to spawn a thread")
         };
 
@@ -165,7 +156,6 @@ impl WatcherBackend for FSEventStreamBackend {
 async fn event_loop(
     mut callback: BackendEventHandler,
     mut report_rescan: Option<Box<dyn FnMut() + Send>>,
-    muted_paths: Vec<PathBuf>,
     shared_impl: Arc<Shared>,
     mut fs_event_stream_events: mpsc::UnboundedReceiver<thread::Result<Vec<FSEventStreamEvent>>>,
 ) {
@@ -179,12 +169,10 @@ async fn event_loop(
                     let _span = trace_span!("event_loop", event = ?event).entered();
                     let mut watches = shared_impl.watches.lock().expect("mutex is poisoned");
 
-                    let subscriptions = if muted_paths.iter().any(|ignored| event.path.starts_with(ignored)) {
-                        None
-                    } else {
-                        watches.query(&event.path).log(|err| warn!(?err, "query has failed")).ok()
-                    }
-                    .unwrap_or_default();
+                    let subscriptions = watches
+                        .query(&event.path)
+                        .log(|err| warn!(?err, "query has failed"))
+                        .unwrap_or_default();
 
                     if let Some(translated) = fs_event_stream::event(&event.path, event.flags, subscriptions.is_empty()) {
                         if matches!(translated, BackendEvent::Overflow) {

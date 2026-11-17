@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 pub use crate::util::Debug;
 
@@ -28,14 +28,12 @@ pub struct BackendOptions {
 pub struct MacosOptions {
     pub fs_event_stream_latency: Duration,
     pub report_rescan: Option<Debug<Box<dyn FnMut() + Send>>>,
-    pub muted_paths: Vec<PathBuf>,
 }
 
 impl Default for MacosOptions {
     fn default() -> Self {
         Self {
             report_rescan: None,
-            muted_paths: Vec::new(),
             fs_event_stream_latency: Duration::from_millis(10),
         }
     }
@@ -71,22 +69,18 @@ impl UlimitStrategy {
 #[derive(Debug)]
 pub struct LinuxOptions {
     pub ulimit_strategy: Debug<UlimitStrategy>,
-    pub muted_paths: Vec<PathBuf>,
 }
 
 impl Default for LinuxOptions {
     fn default() -> Self {
         Self {
             ulimit_strategy: Debug::wrap(UlimitStrategy::carry_on()),
-            muted_paths: Vec::new(),
         }
     }
 }
 
 #[derive(Default, Debug)]
-pub struct WindowsOptions {
-    pub muted_paths: Vec<PathBuf>,
-}
+pub struct WindowsOptions {}
 
 pub struct Builder {
     options: WatcherOptions,
@@ -111,22 +105,6 @@ impl Builder {
     /// See [UlimitStrategy].
     pub fn linux_on_ulimit(mut self, value: UlimitStrategy) -> Self {
         self.options.backend.linux.ulimit_strategy = Debug::wrap(value);
-        self
-    }
-
-    /// Not meant to be used by clients.
-    ///
-    /// Paths that will not be processed at all.
-    /// It exists only to avoid endless spam in the rare case of the application watching its own logs.
-    pub fn muted_paths(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        let paths = paths.into_iter().map(Into::into).collect::<Vec<_>>();
-        if cfg!(target_os = "windows") {
-            self.options.backend.windows.muted_paths = paths;
-        } else if cfg!(target_os = "macos") {
-            self.options.backend.macos.muted_paths = paths;
-        } else if cfg!(target_os = "linux") {
-            self.options.backend.linux.muted_paths = paths;
-        }
         self
     }
 
