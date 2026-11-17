@@ -65,6 +65,12 @@ bitflags::bitflags! {
         const FILE_EVENTS = kFSEventStreamCreateFlagFileEvents;
         /// Controls the interpretation of `latency`: when set, the first event is emitted immediately and subsequent events are delayed.
         const NO_DEFER = kFSEventStreamCreateFlagNoDefer;
+        /// Requests `kFSEventStreamEventFlagRootChanged` events: one is sent when a directory along the path to one of the
+        /// watched paths changes (it or an ancestor is deleted, renamed or moved, or the path comes back into existence).
+        /// Such an event carries the watched path (which may no longer exist) and the event id zero, and [`event`] turns it
+        /// into [`BackendEvent::Ambiguous`]: the state of the watched path is unknown, so it is rescanned and the watches
+        /// under it are torn down.
+        const WATCH_ROOT = kFSEventStreamCreateFlagWatchRoot;
     }
 }
 
@@ -401,7 +407,13 @@ pub fn event(path: &Path, flags: FSEventStreamEventFlags, has_no_audience: bool)
         || (flags & kFSEventStreamEventFlagItemChangeOwner) != 0;
     // kFSEventStreamEventFlagItemRenamed is set both for the old and the new path
     let ambiguous = (flags & kFSEventStreamEventFlagItemRenamed) != 0 || (removed && changed) || (removed && created);
-    return if (flags & kFSEventStreamEventFlagMustScanSubDirs) != 0 {
+    return if (flags & kFSEventStreamEventFlagRootChanged) != 0 {
+        // Only with `FsEventStreamFlags::WATCH_ROOT`: `path` is one of the watched paths, and something along the way to it
+        // has changed. It may be gone, or it may be a different directory with a different content, so everything below it
+        // has to be rescanned. No events are lost though, hence not an Overflow.
+        // https://developer.apple.com/documentation/coreservices/kfseventstreameventflagrootchanged
+        Some(BackendEvent::Ambiguous)
+    } else if (flags & kFSEventStreamEventFlagMustScanSubDirs) != 0 {
         warn!(
             flags = print_event_flags(flags),
             "received kFSEventStreamEventFlagMustScanSubDirs on {}",
@@ -453,6 +465,18 @@ pub fn event(path: &Path, flags: FSEventStreamEventFlags, has_no_audience: bool)
     };
 }
 
+/// Restores the order in which the events of a batch happened.
+///
+/// FSEvents does not order the events of a batch by id: a later creation has been observed listed before an earlier one.
+/// Ids grow with time, so sorting by id restores the order.
+///
+/// A `kFSEventStreamEventFlagRootChanged` event has no id (it is zero), so its place in time is unknown. It goes last:
+/// the rescan it causes supersedes whatever else the batch says about its path, whereas an event processed after the
+/// rescan would be taken at face value, e.g. the creation of a file that the rescan has already found gone.
+fn sort_by_time(events: &mut [FSEventStreamEvent]) {
+    events.sort_by_key(|event| ((event.flags & kFSEventStreamEventFlagRootChanged) != 0, event.id));
+}
+
 /// Placeholder of [`CallbackContext::latest_event_id`] before the first event; event ids start at 1.
 const NO_EVENT_ID: FSEventStreamEventId = 0;
 
@@ -497,14 +521,38 @@ extern "C" fn fs_event_stream_callback(
             context.latest_event_id.fetch_max(id, Ordering::Release);
             events.push(FSEventStreamEvent { id, path, flags });
         }
-        // FSEvents does not order the events of a batch by id: a later creation has been observed listed before an earlier one.
-        // Ids grow with time, so sorting restores the order in which the events happened.
-        events.sort_by_key(|event| event.id);
+        sort_by_time(&mut events);
 
         events
     });
 
     (context.function)(events);
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn event(id: FSEventStreamEventId, path: &str, flags: FSEventStreamEventFlags) -> FSEventStreamEvent {
+        FSEventStreamEvent {
+            id,
+            path: PathBuf::from(path),
+            flags,
+        }
+    }
+
+    #[test]
+    fn events_are_ordered_by_id_and_a_root_change_goes_last() {
+        let created = kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemIsFile;
+        let mut events = vec![
+            event(5, "/root/later", created),
+            event(0, "/root", kFSEventStreamEventFlagRootChanged),
+            event(3, "/root/earlier", created),
+        ];
+        sort_by_time(&mut events);
+        let order = events.iter().map(|evt| evt.path.to_str().unwrap()).collect::<Vec<_>>();
+        assert_eq!(vec!["/root/earlier", "/root/later", "/root"], order);
+    }
 }
 
 //======================================================= BINDINGS =======================================================

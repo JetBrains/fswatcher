@@ -166,6 +166,7 @@ pub fn default_backend(options: BackendOptions, callback_fn: BackendEventHandler
     {
         return Ok(macos::FSEventStreamBackend::create(
             &[PathBuf::from("/")],
+            macos::FsEventStreamFlags::default(),
             options.macos,
             callback_fn,
         )?);
