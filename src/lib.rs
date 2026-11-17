@@ -176,6 +176,22 @@ impl Watcher {
             .unregister_subscription(subscription_id);
     }
 
+    /// Replaces the set of canonical paths the platform event source reports events for.
+    ///
+    /// The set is accepted as is: it fully replaces the previous one, and the paths are assumed to be canonical.
+    /// An empty set silences everything until the next call. Only the macOS backend has such a notion (a single
+    /// `FSEventStream` covers everything, and this narrows or widens it), the other platforms do nothing here.
+    /// See [`WatcherBackend::set_event_source_paths`].
+    ///
+    /// Watches outside the set currently stay registered but receive nothing, the ones the canonicalization keeps on the
+    /// ancestors of a root included. This is subject to change: a change above a root must not go unnoticed, and how the
+    /// canonicalization is told about it has not been decided yet.
+    pub fn set_event_source_paths(&self, canonical_paths: &[PathBuf]) -> anyhow::Result<()> {
+        self.backend
+            .set_event_source_paths(canonical_paths)
+            .map_err(|err| anyhow::anyhow!("failed to set the event source paths: {err:?}"))
+    }
+
     pub fn shutdown_and_join(self) -> anyhow::Result<()> {
         fn panic_anyhow(err: Box<dyn std::any::Any + Send + 'static>) -> anyhow::Error {
             let error = if let Some(error) = err.downcast_ref::<String>() {
