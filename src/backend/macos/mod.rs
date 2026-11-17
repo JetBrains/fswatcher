@@ -21,7 +21,8 @@ use super::{
     registry::Watches, Audience, BackendError, BackendEvent, BackendEventContext, BackendEventHandler, ParentPolicy, Scope,
     SubscriptionId, WatcherBackend,
 };
-use fs_event_stream::{fs_event_stream, FSEventStream, FSEventStreamEvent, FsEventStreamError, FsEventStreamFlags};
+pub use fs_event_stream::FsEventStreamFlags;
+use fs_event_stream::{fs_event_stream, FSEventStream, FSEventStreamEvent, FsEventStreamError};
 
 pub struct FSEventStreamBackend {
     thread_handle: thread::JoinHandle<()>,
@@ -32,22 +33,23 @@ pub struct FSEventStreamBackend {
 impl FSEventStreamBackend {
     /// `paths_to_watch` is the initial set of canonical paths the `FSEventStream` covers; it can be replaced later
     /// with [`WatcherBackend::set_event_source_paths`].
-    pub fn create(paths_to_watch: &[PathBuf], options: MacosOptions, callback: BackendEventHandler) -> Result<Self, FsEventStreamError> {
+    ///
+    /// `flags` configure the stream and survive every rebuild of it
+    pub fn create(
+        paths_to_watch: &[PathBuf],
+        flags: FsEventStreamFlags,
+        options: MacosOptions,
+        callback: BackendEventHandler,
+    ) -> Result<Self, FsEventStreamError> {
         let (events_tx, events_rx) = mpsc::unbounded::<thread::Result<Vec<FSEventStreamEvent>>>();
         let MacosOptions {
             fs_event_stream_latency,
             report_rescan,
             muted_paths,
         } = options;
-        let fs_event_stream = fs_event_stream(
-            paths_to_watch,
-            &[],
-            fs_event_stream_latency,
-            FsEventStreamFlags::default(),
-            move |events| {
-                let _ = events_tx.unbounded_send(events);
-            },
-        )?;
+        let fs_event_stream = fs_event_stream(paths_to_watch, &[], fs_event_stream_latency, flags, move |events| {
+            let _ = events_tx.unbounded_send(events);
+        })?;
         let shared_impl = Arc::new(Shared {
             watches: Mutex::new(Watches::default()),
         });

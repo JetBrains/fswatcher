@@ -74,7 +74,9 @@ fn test(
     );
     let before_latch_path = vault.path().join("latch_before");
     let after_latch_path = vault.path().join("latch_after");
-    backend.add_watch(vault.path(), test_subscription, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+    backend
+        .add_watch(vault.path(), test_subscription, Scope::DirectChildren, ParentPolicy::Unchecked)
+        .unwrap();
     let mut received = timeout_iterator(&rx, RECV_TIMEOUT);
     create(&before_latch_path);
     // Wait for the latch before running the body: a body that changes the event source (see
@@ -123,7 +125,9 @@ fn create_file() {
     retry(|| {
         let dir = files!({});
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             create(dir.path().join("file"));
         })?;
         assert_eq!(
@@ -145,7 +149,9 @@ fn create_directory() {
     retry(|| {
         let dir = files!({});
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             create_dir(dir.path().join("dir"));
         })?;
         assert_eq!(
@@ -167,7 +173,9 @@ fn create_symlink() {
     retry(|| {
         let dir = files!({ "original" => {} });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             symlink(dir.path().join("original"), dir.path().join("symlink"));
         })?;
         let expected = if cfg!(target_os = "windows") {
@@ -205,7 +213,9 @@ fn remove() {
     retry(|| {
         let dir = files!({ "file" => "content" });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             delete(dir.path().join("file"));
         })?;
         assert_eq_pretty!(vec![(dir.path().join("file"), BackendEvent::Removed)], events);
@@ -220,7 +230,9 @@ fn remove_direct_watch() {
         let dir = files!({ "target" => {} });
         let events = test(default_backend_factory, |backend, s, _| {
             let target = dir.path().join("target");
-            backend.add_watch(&target, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(&target, s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             backend.remove_watch(&target, s, Scope::DirectChildren);
             create(target.join("file"));
         })?;
@@ -251,7 +263,9 @@ fn change_file() {
     retry(|| {
         let dir = files!({ "file" => "content" });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             write_all(dir.path().join("file"), "new-content");
         })?;
         if cfg!(target_os = "macos") {
@@ -311,7 +325,9 @@ fn retarget_symlink() {
         let dir = files!({ "root" => { "original" => {}, "new_target" => {} }});
         symlink(dir.path().join("root/original"), dir.path().join("root/symlink"));
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             // The underlying libc call to `symlink` *will not* overwrite an existing file, so retargeting is a two-step process.
             symlink(dir.path().join("root/new_target"), dir.path().join("new_symlink"));
             rename(dir.path().join("new_symlink"), dir.path().join("root/symlink"));
@@ -366,7 +382,9 @@ fn replace_file_with_symlink() {
     retry(|| {
         let dir = files!({ "root" => { "original" => {}, "watch_target" => "it is a file" }});
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(&dir.path().join("root"), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             // The underlying libc call to `symlink` *will not* overwrite an existing file.
             symlink(dir.path().join("root/original"), dir.path().join("new_symlink"));
             rename(dir.path().join("new_symlink"), dir.path().join("root/watch_target"));
@@ -425,7 +443,9 @@ fn replace_directory_with_file() {
     retry(|| {
         let dir = files!({ "target" => {} });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             dir.delete("target");
             dir.create("target");
         })?;
@@ -474,7 +494,9 @@ fn replace_file_with_directory() {
     retry(|| {
         let dir = files!({ "target" => "" });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             dir.delete("target");
             dir.create_dir("target");
         })?;
@@ -522,7 +544,9 @@ fn replace_file_with_directory() {
     retry(|| {
         let dir = files!({ "target" => { "file" => "content" }, "dir" => {} });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path().join("target"), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(&dir.path().join("target"), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             rename(dir.path().join("dir"), dir.path().join("target\\file"));
         })?;
         assert_eq_pretty!(
@@ -547,7 +571,9 @@ fn change_file_metadata() {
     retry(|| {
         let dir = files!({ "file" => "content" });
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             touch(dir.path().join("file"));
         })?;
         if cfg!(target_os = "macos") {
@@ -589,7 +615,9 @@ fn change_directory_permissions() {
         let dir = files!({ "directory" => {} });
         let dir_path = dir.path().join("directory");
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             set_permissions(&dir_path, 666);
         })?;
         if cfg!(target_os = "macos") {
@@ -633,9 +661,16 @@ fn removing_directory_destroys_all_watches_inside() {
     retry(|| {
         let dir = files!({ "dir" => { "deeply" => { "nested" => { "path" => {} }} }});
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
             backend
-                .add_watch(&dir.path().join("dir/deeply/nested/path"), s, Scope::Recursive, ParentPolicy::Unchecked)
+                .add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked)
+                .unwrap();
+            backend
+                .add_watch(
+                    &dir.path().join("dir/deeply/nested/path"),
+                    s,
+                    Scope::Recursive,
+                    ParentPolicy::Unchecked,
+                )
                 .unwrap();
 
             rename(dir.path().join("dir"), dir.path().join("irrelevant"));
@@ -656,9 +691,16 @@ fn moving_directory_destroys_watches_inside() {
     retry(|| {
         let dir = files!({ "dir" => { "deeply" => { "nested" => { "path" => {} }} }});
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
             backend
-                .add_watch(&dir.path().join("dir/deeply/nested/path"), s, Scope::Recursive, ParentPolicy::Unchecked)
+                .add_watch(&dir.path().join("dir"), s, Scope::Recursive, ParentPolicy::Unchecked)
+                .unwrap();
+            backend
+                .add_watch(
+                    &dir.path().join("dir/deeply/nested/path"),
+                    s,
+                    Scope::Recursive,
+                    ParentPolicy::Unchecked,
+                )
                 .unwrap();
 
             rename(dir.path().join("dir"), dir.path().join("irrelevant"));
@@ -685,7 +727,9 @@ fn write_to_a_file_without_closing_it() {
         let file_path = dir.path().join("target");
         let mut file_handle = OpenOptions::new().create_new(false).write(true).open(&file_path).unwrap();
         let events = test(default_backend_factory, |backend, s, _| {
-            backend.add_watch(&dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
+            backend
+                .add_watch(&dir.path(), s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                .unwrap();
             file_handle.write_all("new content".as_bytes()).unwrap();
         })?;
         assert_eq_pretty!(
@@ -736,7 +780,9 @@ fn require_watched_parent_enforces_contiguous_chain() {
         // descendant is accepted even though its own parent (`recursive/a/b`) is never watched.
         let rec_ancestor = dir.path().join("recursive/a");
         let rec_descendant = dir.path().join("recursive/a/b/c");
-        backend.add_watch(&rec_ancestor, s, Scope::Recursive, ParentPolicy::Unchecked).unwrap();
+        backend
+            .add_watch(&rec_ancestor, s, Scope::Recursive, ParentPolicy::Unchecked)
+            .unwrap();
         backend
             .add_watch(&rec_descendant, s, Scope::DirectChildren, ParentPolicy::RequireWatchedParent)
             .expect("recursive ancestor coverage must satisfy the check");
@@ -758,8 +804,8 @@ fn watch_root() {
 }
 
 mod sanity_check {
-    use std::io::ErrorKind;
     use crate::test_helpers::files;
+    use std::io::ErrorKind;
 
     // macos and linux
     // file -> dir: Err(Os { code: 21, kind: IsADirectory, message: "Is a directory" })
@@ -866,7 +912,9 @@ mod event_source_paths {
                 // The stream starts narrow, instead of the default "/": the vault, so that the latches arrive, and `a`.
                 |options, callback, vault| {
                     let paths = [vault.to_path_buf(), a.clone()];
-                    Box::new(macos::FSEventStreamBackend::create(&paths, options.macos, callback).unwrap())
+                    Box::new(
+                        macos::FSEventStreamBackend::create(&paths, macos::FsEventStreamFlags::default(), options.macos, callback).unwrap(),
+                    )
                 },
                 |backend, s, _| {
                     backend.add_watch(&a, s, Scope::DirectChildren, ParentPolicy::Unchecked).unwrap();
@@ -944,6 +992,105 @@ mod event_source_paths {
                 backend.set_event_source_paths(&[vault.to_path_buf(), a.clone()]).unwrap();
             })?;
             assert_eq_pretty!(Vec::<(PathBuf, BackendEvent)>::new(), events);
+            Ok(())
+        });
+    }
+}
+
+/// [`macos::FsEventStreamFlags::WATCH_ROOT`] reports a change along the path to a watched path as a rescan of that path,
+/// delivered as [`BackendEvent::Ambiguous`] (see `fs_event_stream::event`). Its watches are torn down like for any other
+/// removal, so the body sees nothing else for that path afterwards.
+///
+/// The stream is narrowed to the vault and the watched path instead of the default "/": "/" has no parents that could
+/// change, and a stream over the paths of interest is the configuration the flag exists for.
+#[cfg(target_os = "macos")]
+mod watch_root {
+    use super::*;
+
+    /// a factory that builds a backend with [`macos::FsEventStreamFlags::WATCH_ROOT`] enabled
+    fn watch_root_backend_factory(watched: PathBuf) -> impl FnOnce(BackendOptions, BackendEventHandler, &Path) -> Box<dyn WatcherBackend> {
+        move |options, callback, vault| {
+            let paths = [vault.to_path_buf(), watched];
+            let flags = macos::FsEventStreamFlags::default() | macos::FsEventStreamFlags::WATCH_ROOT;
+            Box::new(macos::FSEventStreamBackend::create(&paths, flags, options.macos, callback).unwrap())
+        }
+    }
+
+    #[test]
+    fn deleting_the_parent_rescans_the_watched_path() {
+        enable_logging();
+        retry(|| {
+            // `watched` is empty on purpose: the removal of anything inside it would race with the root change.
+            let dir = files!({ "parent" => { "watched" => {} } });
+            let watched = dir.path().join("parent/watched");
+            let events = test(watch_root_backend_factory(watched.clone()), |backend, s, _| {
+                backend
+                    .add_watch(&watched, s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                    .unwrap();
+                delete(dir.path().join("parent"));
+            })?;
+            assert_eq_pretty!(vec![(watched.clone(), BackendEvent::Ambiguous)], events);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn renaming_the_parent_rescans_the_watched_path() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({ "parent" => { "watched" => { "file" => "content" } } });
+            let watched = dir.path().join("parent/watched");
+            let events = test(watch_root_backend_factory(watched.clone()), |backend, s, _| {
+                backend
+                    .add_watch(&watched, s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                    .unwrap();
+                rename(dir.path().join("parent"), dir.path().join("renamed"));
+            })?;
+            assert_eq_pretty!(vec![(watched.clone(), BackendEvent::Ambiguous)], events);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn moving_the_parent_rescans_the_watched_path() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({ "parent" => { "watched" => { "file" => "content" } }, "elsewhere" => {} });
+            let watched = dir.path().join("parent/watched");
+            let events = test(watch_root_backend_factory(watched.clone()), |backend, s, _| {
+                backend
+                    .add_watch(&watched, s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                    .unwrap();
+                rename(dir.path().join("parent"), dir.path().join("elsewhere/parent"));
+            })?;
+            assert_eq_pretty!(vec![(watched.clone(), BackendEvent::Ambiguous)], events);
+            Ok(())
+        });
+    }
+
+    /// The case the flag is for: the watched path stays the same, but what is behind it is a different directory with a
+    /// different content. Nothing under the path has changed, so without the flag there is nothing to report.
+    #[test]
+    fn replacing_the_parent_rescans_the_watched_path() {
+        enable_logging();
+        retry(|| {
+            let dir = files!({
+                "parent" => { "watched" => { "file" => "content" } },
+                "other" => { "watched" => { "another" => "content" } },
+            });
+            let watched = dir.path().join("parent/watched");
+            let events = test(watch_root_backend_factory(watched.clone()), |backend, s, _| {
+                backend
+                    .add_watch(&watched, s, Scope::DirectChildren, ParentPolicy::Unchecked)
+                    .unwrap();
+                // `rename` refuses to replace a non-empty directory, so the swap takes two steps.
+                rename(dir.path().join("parent"), dir.path().join("gone"));
+                rename(dir.path().join("other"), dir.path().join("parent"));
+            })?;
+            // One rescan for the disappearance, and FSEvents may notice the reappearance in time to report a second one.
+            let expected = (watched.clone(), BackendEvent::Ambiguous);
+            let eq = !events.is_empty() && events.iter().all(|evt| evt.eq(&expected));
+            assert!(eq, "expected one or more {:#?}, got {:#?}", expected, events);
             Ok(())
         });
     }
