@@ -97,7 +97,8 @@ pub trait WatcherBackend {
     /// Watches registered with [`WatcherBackend::add_watch`] stay registered, but only those under one of `canonical_paths` receive events.
     ///
     /// Only the macOS backend has such a notion: a single `FSEventStream` covers everything, and this call narrows (or widens) it
-    /// (see `macos::FSEventStreamBackend`). An empty set is accepted and silences the backend until the next call; what happens in between is not reported later.
+    /// (see `macos::FSEventStreamBackend`). An empty set is accepted and silences the backend until the next call; what happens in between is not
+    /// reported later, except that a change made right before the next call may slip in (see `macos::fs_event_stream::FSEventStream::set_paths`).
     /// The other backends watch exactly what they were asked to and do nothing here.
     fn set_event_source_paths(&self, canonical_paths: &[PathBuf]) -> Result<(), BackendError> {
         let _ = canonical_paths;

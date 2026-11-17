@@ -130,6 +130,8 @@ impl FSEventStream {
     ///
     /// An empty set is accepted: FSEvents refuses to create a stream without paths, so no stream exists until the
     /// next call. Everything that happens in the meantime is ignored, and the next non-empty set starts from "now".
+    /// "Now" is the head of the id sequence of fseventsd, which numbers kernel events with a lag, so a change made
+    /// right before the call may still be delivered (see [`FSEventStream::create`]).
     ///
     /// On failure the old stream is already gone and no events are delivered; the error is the same one
     /// [`fs_event_stream`] reports.
