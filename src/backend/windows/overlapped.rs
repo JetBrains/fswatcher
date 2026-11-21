@@ -23,7 +23,8 @@ pub struct OverlappedBuffer {
 
 impl OverlappedBuffer {
     pub fn alloc(layout: Layout) -> Self {
-        let buffer = NonNull::new(unsafe { alloc::alloc(layout) }).unwrap_or_else(|| alloc::handle_alloc_error(layout));
+        // Zeroed, because `OverlappedIo::completed_bytes` hands the bytes out as a slice.
+        let buffer = NonNull::new(unsafe { alloc::alloc_zeroed(layout) }).unwrap_or_else(|| alloc::handle_alloc_error(layout));
         OverlappedBuffer { buffer, layout }
     }
 }
@@ -66,6 +67,17 @@ impl OverlappedIo {
         self.buffer.buffer.as_ptr()
     }
 
+    /// The first `len` bytes of the buffer, at most the whole buffer.
+    ///
+    /// # Safety
+    ///
+    /// No read may be pending on this buffer while the slice lives, because the kernel writes into the buffer during a read.
+    /// The caller holds the completion of the last read and has not started the next one.
+    pub(super) unsafe fn completed_bytes(&self, len: usize) -> &[u8] {
+        let len = len.min(self.buffer.layout.size());
+        std::slice::from_raw_parts(self.buffer.buffer.as_ptr(), len)
+    }
+
     pub(super) fn start_callback(&self) {
         unsafe { StartThreadpoolIo(self.handle) }
     }
@@ -103,7 +115,10 @@ extern "system" fn overlapped_io_callback(
 
     let message = panic::catch_unwind(|| match WIN32_ERROR(io_result) {
         ERROR_SUCCESS if number_of_bytes_transferred == 0 => IoMessage::Empty { drive_id },
-        ERROR_SUCCESS if number_of_bytes_transferred != 0 => IoMessage::IoCompleted { drive_id },
+        ERROR_SUCCESS if number_of_bytes_transferred != 0 => IoMessage::IoCompleted {
+            drive_id,
+            bytes: number_of_bytes_transferred,
+        },
         ERROR_OPERATION_ABORTED => IoMessage::IoCancelled { drive_id },
         error => IoMessage::IoFailed {
             drive_id,

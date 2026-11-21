@@ -13,7 +13,10 @@ use std::{
     ops::DerefMut,
     panic,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
 };
 
@@ -260,8 +263,8 @@ async fn event_loop(
             LoopEvent::IoMessage(message) => {
                 trace!(?message, "received a message");
                 match message {
-                    IoMessage::IoCompleted { drive_id } => {
-                        state.receive_packet(&drive_id);
+                    IoMessage::IoCompleted { drive_id, bytes } => {
+                        state.receive_packet(&drive_id, bytes);
                     }
                     IoMessage::Empty { drive_id } => {
                         trace!(?drive_id, "received completion notification");
@@ -369,14 +372,26 @@ struct DriveEvent {
 
 impl EventLoopState {
     #[instrument(skip(self))]
-    fn receive_packet(&mut self, drive_id: &DriveId) {
+    fn receive_packet(&mut self, drive_id: &DriveId, bytes: usize) {
         let mut state = self.shared.state.lock().expect("mutex is poisoned");
 
         let SharedState {
             pending_io, drives_by_id, ..
         } = &mut state.deref_mut();
         if let Some(pending) = pending_io.get_mut(drive_id) {
-            let notifications = unsafe { read_file_notify_information(pending.overlapped.get_buffer(), pending.notify_information_class) };
+            // The completion message is the end of the only read on this buffer, and the next read starts below,
+            // after the last use of the slice. A drive id is never given to a second `PendingIO`.
+            let parsed = read_file_notify_information(
+                unsafe { pending.overlapped.completed_bytes(bytes) },
+                pending.notify_information_class,
+            );
+            // A buffer that does not parse means lost events, so the drive is rescanned.
+            let mut lost_events_on: Option<PathBuf> = None;
+            let notifications = parsed.unwrap_or_else(|malformed| {
+                warn!(?drive_id, bytes, %malformed, "the notification buffer is malformed, rescanning the drive");
+                lost_events_on = drives_by_id.get(drive_id).map(|drive| drive.prefix.to_path_buf());
+                Vec::new()
+            });
             trace!(?drive_id, "received notifications: {notifications:#?}");
 
             if let Some(drive) = drives_by_id.get(drive_id) {
@@ -447,6 +462,9 @@ impl EventLoopState {
                     backend: self.shared.as_ref(),
                 };
                 (self.callback)(ctx);
+            }
+            if let Some(drive_path) = lost_events_on {
+                self.rescan_drive(drive_path);
             }
         } else {
             error!("received packet for unknown completion key");
@@ -565,11 +583,11 @@ impl EventLoopState {
         let mut state = self.shared.state.lock().expect("mutex is poisoned");
 
         let SharedState {
+            id_source,
             pending_io,
             drives_by_id,
             drives_by_name,
             io_events,
-            ..
         } = &mut state.deref_mut();
         for (removed_id, removed_path) in removed_devices {
             let _span = trace_span!("removed_devices", path = %removed_path.display(), ?removed_id).entered();
@@ -586,16 +604,26 @@ impl EventLoopState {
         let mut drives_to_rescan = HashSet::<PathBuf>::new();
         for (added_id, added_path) in added_devices {
             let _span = trace_span!("added_devices", path = %added_path.display(), ?added_id).entered();
-            if let Some(&drive_id) = drives_by_name.get(&added_path) {
-                if let Some(drive) = drives_by_id.get(&drive_id) {
+            // The first report of the device watcher lists every present device as added, watched drives included.
+            // A live read has missed nothing, so it stays.
+            // A restart takes a new drive id, as `ensure_drive` does. The old `PendingIO` keeps the old id until
+            // its last message arrives. So a message always names the `PendingIO` whose read produced it.
+            if let Some(drive_id) = drives_by_name.get(&added_path).copied() {
+                if pending_io.get(&drive_id).is_some_and(|pending| !pending.is_cancelled()) {
+                    trace!("Drive exists and its read is live, keeping it");
+                } else if let Some(drive) = drives_by_id.remove(&drive_id) {
                     trace!("Drive exists, restarting monitoring");
-                    match watch_drive(&io_events, drive_id, &added_path, NotifyInformationClass::ExtendedInformation) {
+                    let new_drive_id = DriveId(id_source.next());
+                    match watch_drive(io_events, new_drive_id, &added_path, NotifyInformationClass::ExtendedInformation) {
                         Ok(new_pending) => {
-                            pending_io.insert(drive_id, new_pending);
+                            pending_io.insert(new_drive_id, new_pending);
                             drives_to_rescan.insert(drive.prefix.to_path_buf());
+                            drives_by_name.insert(added_path.clone(), new_drive_id);
+                            drives_by_id.insert(new_drive_id, drive);
                         }
                         Err(err) => {
                             error!(drive = ?added_path, ?err, "failed to restart the watcher for drive");
+                            drives_by_id.insert(drive_id, drive);
                         }
                     }
                 }
@@ -624,10 +652,17 @@ pub struct PendingIO {
     overlapped: OverlappedIo,
     handle: FileHandle,
     notify_information_class: NotifyInformationClass,
+    // Set by `cancel_io`. A cancelled read stays in `pending_io` until its last message arrives.
+    cancelled: AtomicBool,
 }
 
 impl PendingIO {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
     fn cancel_io(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
         unsafe { CancelIo(self.handle.as_handle()) }.unwrap_or_else(|err| error!(?err, "Failed to cancel drive IO"));
     }
 }
@@ -651,6 +686,7 @@ fn watch_drive(
         overlapped,
         handle,
         notify_information_class,
+        cancelled: AtomicBool::new(false),
     };
 
     read_directory_changes_ex(
@@ -705,6 +741,8 @@ fn event(full_file_path: PathBuf, audience: Audience, n: UnpackedNotification) -
 enum IoMessage {
     IoCompleted {
         drive_id: DriveId,
+        // The bytes the read transferred. The reader of the buffer stays inside them.
+        bytes: usize,
     },
     IoFailed {
         drive_id: DriveId,
