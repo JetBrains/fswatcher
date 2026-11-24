@@ -24,6 +24,20 @@ macro_rules! expect_nothing {
     };
 }
 
+/// For a `WatchSessionRx` whose `WatchSessionTx` is gone: the stream has ended, as opposed to `expect_nothing!`,
+/// which asserts that it is still open with nothing to deliver.
+macro_rules! expect_closed {
+    ($rx:expr) => {
+        let rx = $rx;
+        let r = rx
+            .next_event()
+            .now_or_never()
+            .expect("future should be completed")
+            .map(|r| r.expect("overflow"));
+        assert_eq_pretty!(None, r, "expected the end of the session");
+    };
+}
+
 macro_rules! expect_changed_file {
     ($session:expr, $path:expr) => {{
         let s = $session;
@@ -915,12 +929,35 @@ fn dropping_tx_causes_rx_to_return_none() {
 
         drop(tx);
         fake.emulate_file_changed(&file_path);
-        let evt = rx
-            .next_event()
-            .now_or_never()
-            .expect("future should be completed")
-            .map(|r| r.expect("overflow"));
-        assert_eq_pretty!(None, evt, "expected None after dropping WatchSessionTx");
+        expect_closed!(&mut rx);
+    })
+}
+
+/// a client that drops its `WatchSessionTx` must not wait for the backlog, neither the events that are
+/// not read from the channel yet nor the ones already translated but not yet handed out.
+#[test]
+fn dropping_tx_discards_the_backlog() {
+    let dir = files!({ "target" => { "a" => "a", "b" => "b" } });
+    symlink(dir.path().join("target"), dir.path().join("link"));
+    let root_path = dir.path();
+    test(|fake, watcher| {
+        let mut session = watcher.session();
+        // Two roots over the same canonical directory: one backend event translates to two client events,
+        // the second of which stays pending in the receiver after the first is read.
+        session.add_watch_root(root_path.join("link"), Scope::DirectChildren);
+        session.add_watch_root(root_path.join("target"), Scope::DirectChildren);
+
+        fake.emulate_file_changed(root_path.join("target/a"));
+        // Either alias may come first, the order is not part of the contract.
+        assert_matches!(expect_event!(&mut session), Event::Dirty { .. });
+        // Translated and pending: the other alias of `a`. Not translated: `b`, still in the channel.
+        fake.emulate_file_changed(root_path.join("target/b"));
+
+        let (tx, mut rx) = session.split();
+        drop(tx);
+        expect_closed!(&mut rx);
+        // And it stays that way.
+        expect_closed!(&mut rx);
     })
 }
 
