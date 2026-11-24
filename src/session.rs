@@ -4,7 +4,10 @@ use std::{
     num::NonZeroU32,
     ops::Deref,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use tracing::{instrument, trace, trace_span, warn, Instrument};
@@ -75,6 +78,7 @@ pub(crate) fn session<'a>(watcher: impl Deref<Target = Watcher> + Send + Sync + 
         session_id,
         watcher: Box::new(watcher),
         state: Mutex::new(SessionState::new(canonicalization_subscription_id)),
+        closed: AtomicBool::new(false),
     });
     let tx = WatchSessionTx { inner: inner.clone() };
     let rx = WatchSessionRx {
@@ -87,9 +91,11 @@ pub(crate) fn session<'a>(watcher: impl Deref<Target = Watcher> + Send + Sync + 
 
 impl<'a> Drop for WatchSessionTx<'a> {
     fn drop(&mut self) {
+        // The flag is what makes `WatchSessionRx::next_event` return `None` *at once*.
+        self.inner.closed.store(true, Ordering::Release);
         // Destroying the session removes its event handler from dispatch, which drops the channel
-        // sender (events_tx) and closes the underlying channel, causing WatchSessionRx::next_event
-        // to return None.
+        // sender (events_tx) and closes the underlying channel, which wakes WatchSessionRx::next_event
+        // if it is waiting for an event.
         let mut dispatch = self.inner.watcher.dispatch.lock().expect("mutex is poisoned");
         dispatch.destroy_session(self.inner.session_id);
     }
@@ -352,14 +358,24 @@ impl<'a> WatchSessionTx<'a> {
 }
 
 impl<'a> WatchSessionRx<'a> {
+    /// Returns the next event, or `None` once the [`WatchSessionTx`] of this session has been dropped.
+    ///
+    /// The end is immediate: events that the backend has delivered but the client has not read yet are discarded.
     pub async fn next_event(&mut self) -> Option<Result<Event, ClientOverflow>> {
         let span = trace_span!("next_event", ?self.inner.session_id);
         async {
             loop {
+                if self.inner.closed.load(Ordering::Acquire) {
+                    trace!(backlog = self.pending.len(), "the session is closed, dropping the backlog");
+                    self.pending.clear();
+                    break None;
+                }
                 if let Some(next) = self.pending.pop_front() {
                     break Some(Ok(next));
-                } else {
-                    let session_event = self.events.next().await?;
+                }
+                let session_event = self.events.next().await?;
+                // The session may have been closed while this was waiting; the event is not worth translating then.
+                if !self.inner.closed.load(Ordering::Acquire) {
                     match session_event.log(|_| warn!("Too slow, the channel is overflown")) {
                         Err(_) => break Some(Err(ClientOverflow)),
                         Ok(event) => {
@@ -458,6 +474,8 @@ pub(crate) struct InnerSession<'a> {
     // used from event_stream
     pub(crate) watcher: Box<dyn Deref<Target = Watcher> + Send + Sync + 'a>,
     session_id: SessionId,
+    /// Raised when the `WatchSessionTx` is dropped, see [`WatchSessionRx::next_event`].
+    closed: AtomicBool,
 }
 
 impl<'a> Drop for InnerSession<'a> {
