@@ -23,6 +23,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Only used to resolve dependencies to their minimum versions. Bump deliberately,
+  # ideally in the same commit that bumps rust-toolchain.toml.
+  rust_nightly: nightly-2026-11-23
 
 jobs:
   build-and-test:
@@ -75,3 +78,35 @@ jobs:
         run: cargo test --locked --no-fail-fast
         env:
           RUST_LOG: ${{ github.event.inputs.rust_log }}
+
+  # Proves that the version floors in Cargo.toml are honest: every direct dependency
+  # is resolved to the oldest version the manifest allows, and the crate must still
+  # build on all three platforms and pass its tests.
+  minimal-versions:
+    name: Minimal dependency versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml selects the stable toolchain that builds and tests.
+      # The pinned nightly is used for exactly one thing: the unstable resolver flag.
+      - name: Rust toolchains
+        run: |
+          rustup toolchain install ${{ env.rust_nightly }} --profile minimal
+          rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
+          rustc --version
+
+      - name: Resolve direct dependencies to their minimum versions
+        run: cargo +${{ env.rust_nightly }} update -Z direct-minimal-versions
+
+      # `--locked` keeps the lock file the step above produced from being re-resolved.
+      - name: Check all platforms
+        run: |
+          cargo check --locked --all-targets
+          cargo check --locked --all-targets --target x86_64-pc-windows-msvc
+          cargo check --locked --all-targets --target aarch64-apple-darwin
+
+      - name: Test
+        run: cargo test --locked --no-fail-fast
