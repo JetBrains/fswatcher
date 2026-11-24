@@ -61,7 +61,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain') }}
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       # Covers the lib, the integration tests, the benches and the examples.
       - name: Build
