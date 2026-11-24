@@ -2,7 +2,7 @@ use std::{
     alloc::Layout,
     ffi::OsString,
     io,
-    mem::{self, offset_of, MaybeUninit},
+    mem::{self, offset_of},
     os::windows::ffi::{OsStrExt, OsStringExt},
     panic,
     path::{Path, PathBuf},
@@ -18,6 +18,7 @@ use windows::{
 };
 
 use super::{file_handle::FileHandle, overlapped::OverlappedIo, FileType};
+use crate::backend::notify_buffer;
 
 const READ_DIRECTORY_CHANGES_BUFFER_SIZE: usize = 512 * 1024;
 pub const READ_DIRECTORY_CHANGES_BUFFER_LAYOUT: Layout = unsafe {
@@ -127,81 +128,55 @@ impl FileAction {
     }
 }
 
-pub unsafe fn read_file_notify_information(buffer: *mut u8, notify_information_class: NotifyInformationClass) -> Vec<FileNotification> {
-    use std::slice;
-    use windows::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_NOTIFY_EXTENDED_INFORMATION, FILE_NOTIFY_INFORMATION,
+// The bounded reader knows the entry layouts as plain offsets. They must match the `windows` crate's types.
+const _: () = {
+    use windows::Win32::Storage::FileSystem::{FILE_NOTIFY_EXTENDED_INFORMATION, FILE_NOTIFY_INFORMATION};
+    assert!(offset_of!(FILE_NOTIFY_INFORMATION, NextEntryOffset) == 0);
+    assert!(offset_of!(FILE_NOTIFY_INFORMATION, Action) == notify_buffer::BASIC.action);
+    assert!(offset_of!(FILE_NOTIFY_INFORMATION, FileNameLength) == notify_buffer::BASIC.name_length);
+    assert!(offset_of!(FILE_NOTIFY_INFORMATION, FileName) == notify_buffer::BASIC.name);
+    assert!(notify_buffer::BASIC.attributes.is_none());
+    assert!(offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, NextEntryOffset) == 0);
+    assert!(offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, Action) == notify_buffer::EXTENDED.action);
+    assert!(matches!(
+        notify_buffer::EXTENDED.attributes,
+        Some(offset) if offset == offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, FileAttributes)
+    ));
+    assert!(offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, FileNameLength) == notify_buffer::EXTENDED.name_length);
+    assert!(offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, FileName) == notify_buffer::EXTENDED.name);
+};
+
+/// Reads the notifications of one completed read. `bytes` is what the read transferred into the buffer.
+///
+/// The reader stays inside `bytes`. A chain that does not fit them is an error, and the caller must treat it as lost events.
+pub fn read_file_notify_information(
+    bytes: &[u8],
+    notify_information_class: NotifyInformationClass,
+) -> Result<Vec<FileNotification>, notify_buffer::Malformed> {
+    use windows::Win32::Storage::FileSystem::{FILE_ACTION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT};
+
+    let layout = match notify_information_class {
+        NotifyInformationClass::Information => notify_buffer::BASIC,
+        NotifyInformationClass::ExtendedInformation => notify_buffer::EXTENDED,
     };
-
-    // We cannot simply reinterpret the pointer from *u8 to *FILE_NOTIFY(_EXTENDED)_INFORMATION
-    // here, because there is no guarantee that `ptr` will stay aligned by the alignment
-    // of the struct (8) after adding `NextEntryOffset` to it.
-    //
-    // Note that, since rust 1.70, a check is performed on all pointer reads for proper
-    // alignment. Misaligned reads cause a panic.
-    //
-    // Also note that this read is incomplete: FILE_NOTIFY_EXTENDED_INFORMATION uses
-    // the flexible array member pattern to store the file name as a part of the struct,
-    // which means we are slicing off the file name and it isn't part of the `entry`.
-    //
-    // Because of that we get the file name as a separate read by constructing a slice
-    // at the offset of the FileName field relative to the base of the current entry.
-    //
-    // Note that `slice::from_raw_parts` also must be properly aligned, in our case, by the
-    // size of u16 (2 bytes). Given that the base pointer of the entire buffer is known to be
-    // aligned at DWORD (a requirement of ReadDirectoryChangesEx) and that all the struct
-    // members' sizes are a multiple of two, we can safely assume that the alignment here will
-    // also be proper.
-
-    let mut notifications = Vec::new();
-    let mut ptr = buffer;
-    match notify_information_class {
-        NotifyInformationClass::Information => loop {
-            let mut entry = MaybeUninit::<FILE_NOTIFY_INFORMATION>::uninit();
-            ptr.copy_to(entry.as_mut_ptr() as *mut u8, mem::size_of::<FILE_NOTIFY_INFORMATION>());
-            let entry = entry.assume_init();
-
-            let name_slice = slice::from_raw_parts(
-                ptr.add(offset_of!(FILE_NOTIFY_INFORMATION, FileName)) as *const u16,
-                (entry.FileNameLength / 2) as usize,
-            );
-            let file_name = OsString::from_wide(name_slice);
-
-            notifications.push(FileNotification::Information {
-                file_name,
-                action: FileAction::from_win(entry.Action),
-            });
-
-            ptr = match entry.NextEntryOffset {
-                0 => break notifications,
-                n => ptr.add(n as usize),
-            };
-        },
-
-        NotifyInformationClass::ExtendedInformation => loop {
-            let mut entry = MaybeUninit::<FILE_NOTIFY_EXTENDED_INFORMATION>::uninit();
-            ptr.copy_to(entry.as_mut_ptr() as *mut u8, mem::size_of::<FILE_NOTIFY_EXTENDED_INFORMATION>());
-            let entry = entry.assume_init();
-
-            let name_slice = slice::from_raw_parts(
-                ptr.add(offset_of!(FILE_NOTIFY_EXTENDED_INFORMATION, FileName)) as *const u16,
-                (entry.FileNameLength / 2) as usize,
-            );
-            let file_name = OsString::from_wide(name_slice);
-
-            notifications.push(FileNotification::ExtendedInformation {
-                file_name,
-                action: FileAction::from_win(entry.Action),
-                is_dir: (entry.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0,
-                is_symlink: (entry.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0,
-            });
-
-            ptr = match entry.NextEntryOffset {
-                0 => break notifications,
-                n => ptr.add(n as usize),
-            };
-        },
-    }
+    let entries = notify_buffer::read_entries(bytes, layout)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let file_name = OsString::from_wide(&entry.name);
+            // `read_entries` admits the five known actions only, so `from_win` does not reach its panic.
+            let action = FileAction::from_win(FILE_ACTION(entry.action));
+            match entry.attributes {
+                None => FileNotification::Information { file_name, action },
+                Some(attributes) => FileNotification::ExtendedInformation {
+                    file_name,
+                    action,
+                    is_dir: (attributes & FILE_ATTRIBUTE_DIRECTORY.0) != 0,
+                    is_symlink: (attributes & FILE_ATTRIBUTE_REPARSE_POINT.0) != 0,
+                },
+            }
+        })
+        .collect())
 }
 
 // Both the buffer and the overlapped structure must live until we receive the completion notification.

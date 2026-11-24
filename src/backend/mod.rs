@@ -8,6 +8,9 @@ mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 mod registry;
+// Only the Windows backend calls it, but it is plain byte arithmetic, so its tests run on every platform.
+#[cfg(any(target_os = "windows", test))]
+mod notify_buffer;
 #[cfg(target_os = "windows")]
 mod windows;
 
