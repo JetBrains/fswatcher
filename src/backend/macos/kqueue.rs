@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use libc::{O_EVTONLY, O_SYMLINK};
+use nix::libc::{O_EVTONLY, O_SYMLINK};
 use nix::{
     errno::Errno,
     sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue},

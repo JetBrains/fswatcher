@@ -242,7 +242,6 @@ dependencies = [
  "dispatch2",
  "futures",
  "inotify",
- "libc",
  "nix",
  "slab",
  "tempfile",
