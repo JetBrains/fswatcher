@@ -96,7 +96,7 @@ fn add_root_on_existing_directory() {
     let root_path = dir.path();
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
         fake.emulate_dir_changed(root_path);
         fake.emulate_file_changed(root_path.join("child"));
         expect_changed_dir!(&mut session, root_path);
@@ -118,7 +118,7 @@ fn add_nested_watch() {
     let root_path = dir.path();
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
         session.watch_directory(root_path.join("dir1"), Scope::DirectChildren).unwrap();
         session.watch_directory(root_path.join("dir1/dir2"), Scope::DirectChildren).unwrap();
 
@@ -135,7 +135,7 @@ fn add_nested_watch() {
 
 #[test]
 fn watch_directory_without_root() {
-    // A canonical path can be watched purely with `watch_directory`, segment by segment, without any prior `watch_root`.
+    // A canonical path can be watched purely with `watch_directory`, segment by segment, without any prior `add_watch_root`.
     let dir = files!({ "a" => { "b" => { "c" => { "file" => "content" } } } });
     let canonical = dir.path().join("a/b/c").canonicalize().expect("canonicalize temp dir");
     test(|fake, watcher| {
@@ -163,7 +163,7 @@ fn watch_directory_requires_watched_parent() {
     let root_path = dir.path().join("root");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
 
         // Jumping straight to root/a/b without watching root/a first is rejected...
         let skipped = session.watch_directory(root_path.join("a/b"), Scope::DirectChildren);
@@ -195,8 +195,8 @@ fn session_receives_events_from_all_added_roots() {
         let mut session = watcher.session();
         let root_path1 = dir.path().join("a");
         let root_path2 = dir.path().join("b");
-        session.watch_root(&root_path1, Scope::DirectChildren);
-        session.watch_root(&root_path2, Scope::DirectChildren);
+        session.add_watch_root(&root_path1, Scope::DirectChildren);
+        session.add_watch_root(&root_path2, Scope::DirectChildren);
 
         fake.emulate_dir_changed(&root_path1);
         fake.emulate_dir_changed(&root_path2);
@@ -218,8 +218,8 @@ fn session_wont_receive_events_from_watches_added_to_other_sessions() {
         let mut session2 = watcher.session();
         let root_path1 = dir.path().join("a");
         let root_path2 = dir.path().join("b");
-        session1.watch_root(&root_path1, Scope::DirectChildren);
-        session2.watch_root(&root_path2, Scope::DirectChildren);
+        session1.add_watch_root(&root_path1, Scope::DirectChildren);
+        session2.add_watch_root(&root_path2, Scope::DirectChildren);
 
         fake.emulate_dir_changed(&root_path2);
 
@@ -241,10 +241,10 @@ fn session_wont_receive_events_from_nested_watches_of_the_same_root_added_to_oth
         let mut session1 = watcher.session();
         let mut session2 = watcher.session();
         let root_path = dir.path();
-        session1.watch_root(root_path, Scope::DirectChildren);
+        session1.add_watch_root(root_path, Scope::DirectChildren);
         session1.watch_directory(root_path.join("a"), Scope::DirectChildren).unwrap();
         session1.watch_directory(root_path.join("b"), Scope::DirectChildren).unwrap();
-        session2.watch_root(&root_path, Scope::DirectChildren);
+        session2.add_watch_root(&root_path, Scope::DirectChildren);
         session2.watch_directory(root_path.join("a"), Scope::DirectChildren).unwrap();
 
         fake.emulate_file_changed(root_path.join("b/foo"));
@@ -260,7 +260,7 @@ fn add_root_on_non_existing_path() {
     let target_path = dir.path().join("dir/another-dir/target");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&target_path, Scope::DirectChildren);
+        session.add_watch_root(&target_path, Scope::DirectChildren);
         dir.create_dir("dir");
         fake.emulate_dir_created(dir.path().join("dir"));
 
@@ -285,7 +285,7 @@ fn root_is_deleted_and_created_again() {
     let root_path = dir.path().join("root");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
 
         dir.delete("root/foo");
         fake.emulate_removed(root_path.join("foo"));
@@ -319,7 +319,7 @@ fn add_root_with_symlink_segment() {
     let symbolic_root = symlink_path.join("target");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&symbolic_root, Scope::DirectChildren);
+        session.add_watch_root(&symbolic_root, Scope::DirectChildren);
         // emulate a change on the canonical path and expect an event for the symbolic one
         fake.emulate_file_changed(dir.path().join("1/real_dir/target/file"));
         expect_changed_file!(&mut session, symbolic_root.join("file"));
@@ -357,8 +357,8 @@ fn event_is_delivered_to_all_registered_aliases() {
         // the session observes two paths that point to the same directory via different symlinks
         let root_path1 = dir.path().join("s1/dir");
         let root_path2 = dir.path().join("s2/dir");
-        session.watch_root(&root_path1, Scope::DirectChildren);
-        session.watch_root(&root_path2, Scope::DirectChildren);
+        session.add_watch_root(&root_path1, Scope::DirectChildren);
+        session.add_watch_root(&root_path2, Scope::DirectChildren);
 
         fake.emulate_file_changed(&dir.path().join("canonical/dir/file"));
         let mut actual = HashSet::<Event>::new();
@@ -395,8 +395,8 @@ fn sibling_symlink_roots_to_same_canonical_both_removed() {
     let root2 = dir.path().join("s2/sub");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root1, Scope::DirectChildren);
-        session.watch_root(&root2, Scope::DirectChildren);
+        session.add_watch_root(&root1, Scope::DirectChildren);
+        session.add_watch_root(&root2, Scope::DirectChildren);
 
         // delete the shared canonical directory behind both symlinks
         dir.delete("canonical/sub");
@@ -425,7 +425,7 @@ fn retarget_notifies_root_not_its_traversal_symlinks() {
     let traversal = link.join("sub"); // /base/link/sub, registered for traversal only
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root, Scope::DirectChildren);
+        session.add_watch_root(&root, Scope::DirectChildren);
         session.watch_symlink(&traversal, Scope::DirectChildren).unwrap();
 
         // retarget the symlink to a directory that has no `sub`
@@ -448,8 +448,8 @@ fn session_with_nested_roots_should_not_duplicate_events() {
 
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path1, Scope::DirectChildren);
-        session.watch_root(root_path2, Scope::DirectChildren);
+        session.add_watch_root(&root_path1, Scope::DirectChildren);
+        session.add_watch_root(root_path2, Scope::DirectChildren);
 
         fake.emulate_file_changed(&file_path);
         expect_changed_file!(&mut session, file_path);
@@ -464,7 +464,7 @@ fn add_watch_is_idempotent() {
     let file_path = root_path.join("dir/file");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
         // add several watches for the same path
         session.watch_directory(&root_path.join("dir"), Scope::DirectChildren).unwrap();
         session.watch_directory(&root_path.join("dir"), Scope::DirectChildren).unwrap();
@@ -485,7 +485,7 @@ fn client_overflow() {
     test_options(1, |fake, watcher| {
         // configure the session to use the smallest buffer possible
         let mut session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
 
         // overflow it
         fake.emulate_dir_changed(root_path.join("a"));
@@ -503,7 +503,7 @@ fn backend_overflow() {
     let root_path = dir.path();
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
         session.watch_directory(root_path.join("subdir"), Scope::DirectChildren).unwrap();
 
         let root_prefix = root_path.prefixes().next().unwrap();
@@ -519,7 +519,7 @@ fn dropping_last_session_clears_everything() {
     let root_path = dir.path();
     test(|fake, watcher| {
         let session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
         session.watch_directory(root_path.join("subdir"), Scope::DirectChildren).unwrap();
         drop(session);
 
@@ -540,7 +540,7 @@ fn watch_nested_symlink() {
     test(|fake, watcher| {
         let mut session = watcher.session();
         // target
-        session.watch_root(dir.path().join("target"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("target"), Scope::DirectChildren);
         // target/symlink
         session
             .watch_symlink(dir.path().join("target/symlink"), Scope::DirectChildren)
@@ -591,7 +591,7 @@ fn outer_symlink_change_destroys_inner_symlink_watch() {
 
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("outer"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("outer"), Scope::DirectChildren);
         session
             .watch_symlink(dir.path().join("outer/inner"), Scope::DirectChildren)
             .unwrap();
@@ -628,7 +628,7 @@ fn remove_path_under_root_destroys_watches() {
     let root_path = dir.path().join("root");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
         session.watch_directory(root_path.join("dir1"), Scope::DirectChildren).unwrap();
         session.watch_directory(root_path.join("dir1/dir2"), Scope::DirectChildren).unwrap();
 
@@ -654,7 +654,7 @@ fn remove_path_containing_root_destroys_root() {
     let root_path = parent_path.join("root");
     test(|fake, watcher| {
         let session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
         session.watch_directory(&root_path.join("dir"), Scope::DirectChildren).unwrap();
 
         session.remove_watches(&parent_path);
@@ -679,7 +679,7 @@ fn remove_path_with_symlink_destroys_symlink_and_watches() {
     symlink(&target_path, &symlink_path);
     test(|fake, watcher| {
         let session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
         session.watch_directory(symlink_path.join("subdir"), Scope::DirectChildren).unwrap();
 
@@ -706,7 +706,7 @@ fn watch_symlinked_directory() {
     symlink(Path::new("../dir"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
 
         // emulate a change on dir/file (the canonical path behind the symlink)
@@ -746,7 +746,7 @@ fn watch_symlinked_directory_recursively() {
     symlink(Path::new("../dir"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::Recursive).unwrap();
 
         // emulate a change on dir/subdir/file (the canonical path behind the symlink)
@@ -771,7 +771,7 @@ fn watch_symlinked_file() {
     symlink(dir.path().join("dir/file"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         // watch the symlink
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
 
@@ -796,7 +796,7 @@ fn watch_dangling_file_symlink() {
     symlink(dir.path().join("dir/file"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
 
         // create the file
@@ -834,7 +834,7 @@ fn watch_dangling_symlink_to_directory() {
     symlink(dir.path().join("dir"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
 
         // create the directory, expect rescan
@@ -874,7 +874,7 @@ fn watch_symlink_on_non_existing_link_returns_error() {
     let missing_link = dir.path().join("missing");
     test(|_fake, watcher| {
         let session = watcher.session();
-        session.watch_root(dir.path(), Scope::DirectChildren);
+        session.add_watch_root(dir.path(), Scope::DirectChildren);
 
         let subscriptions_before = watcher.debug().dispatch.subscriptions.len();
 
@@ -901,7 +901,7 @@ fn dropping_tx_causes_rx_to_return_none() {
     let file_path = dir.path().join("file");
     test(|fake, watcher| {
         let session = watcher.session();
-        session.watch_root(root_path, Scope::DirectChildren);
+        session.add_watch_root(root_path, Scope::DirectChildren);
         let (tx, mut rx) = session.split();
         fake.emulate_file_changed(&file_path);
         let evt = rx.next_event().now_or_never().flatten().map(|r| r.expect("overflow"));
@@ -939,7 +939,7 @@ fn concurrent_traverse_and_retarget_does_not_leak_stale_watch() {
         let session = watcher.session();
         let (tx, mut rx) = session.split();
 
-        tx.watch_root(&base, Scope::DirectChildren);
+        tx.add_watch_root(&base, Scope::DirectChildren);
         tx.watch_symlink(&link, Scope::DirectChildren).unwrap();
 
         fake.emulate_overflow(&base);
@@ -966,7 +966,7 @@ fn detached_watch_directory_is_rejected() {
     let detached = dir.path().join("a/b");
     test(|_fake, watcher| {
         let session = watcher.session();
-        session.watch_root(dir.path(), Scope::DirectChildren);
+        session.add_watch_root(dir.path(), Scope::DirectChildren);
 
         let result = session.watch_directory(&detached, Scope::DirectChildren);
         assert!(
@@ -976,9 +976,56 @@ fn detached_watch_directory_is_rejected() {
     })
 }
 
+/// Every `add_watch_root` is tracked on its own, so every root hears about an overflow above it, nested ones
+/// included. Compare `watch_root_rescan_delivered_once_per_subtree`.
 #[test]
 fn rescan_delievered_on_each_registered_root() {
-    // Every root is registered on its own, so every root hears about an overflow above it, nested ones included.
+    let dir = files!({
+        "dir1" => {},
+        "dir2" => {
+            "dir3" => {},
+        },
+    });
+    let dir_path = dir.path();
+    test(|fake, watcher| {
+        let mut session = watcher.session();
+        let root1 = dir_path.join("dir1");
+        let root2 = dir_path.join("dir2");
+        let root3 = dir_path.join("dir2/dir3");
+        session.add_watch_root(&root1, Scope::DirectChildren);
+        session.add_watch_root(&root2, Scope::DirectChildren);
+        session.add_watch_root(&root3, Scope::DirectChildren);
+
+        let root = dir_path.prefixes().next().unwrap();
+        fake.emulate_event(root, BackendEvent::Overflow);
+        let evt1 = expect_event!(&mut session);
+        let evt2 = expect_event!(&mut session);
+        let evt3 = expect_event!(&mut session);
+
+        let expected = vec![
+            Event::Rescan { path: root1 },
+            Event::Rescan { path: root2 },
+            Event::Rescan { path: root3.clone() },
+        ]
+        .into_iter()
+        .collect::<HashSet<_>>();
+        let actual = vec![evt1, evt2, evt3].into_iter().collect::<HashSet<_>>();
+        assert_eq_pretty!(expected, actual);
+        expect_nothing!(&mut session);
+
+        // The nested root survives the rescan above it: its watch is re-established like any other root's.
+        fake.emulate_file_changed(root3.join("file"));
+        expect_changed_file!(&mut session, root3.join("file"));
+        expect_nothing!(&mut session);
+    })
+}
+
+/// The deprecated `watch_root` is covered by the rescan of a path above it: one `Rescan` per subtree, and the nested
+/// registration is dropped with it, exactly as `remove_watches` on the ancestor would drop it. The client re-registers
+/// what it wants after the rescan.
+#[test]
+#[allow(deprecated)]
+fn watch_root_rescan_delivered_once_per_subtree() {
     let dir = files!({
         "dir1" => {},
         "dir2" => {
@@ -999,17 +1046,28 @@ fn rescan_delievered_on_each_registered_root() {
         fake.emulate_event(root, BackendEvent::Overflow);
         let evt1 = expect_event!(&mut session);
         let evt2 = expect_event!(&mut session);
-        let evt3 = expect_event!(&mut session);
+        expect_nothing!(&mut session);
 
-        let expected = vec![
-            Event::Rescan { path: root1 },
-            Event::Rescan { path: root2 },
-            Event::Rescan { path: root3 },
-        ]
-        .into_iter()
-        .collect::<HashSet<_>>();
-        let actual = vec![evt1, evt2, evt3].into_iter().collect::<HashSet<_>>();
+        let expected = vec![Event::Rescan { path: root1 }, Event::Rescan { path: root2.clone() }]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let actual = vec![evt1, evt2].into_iter().collect::<HashSet<_>>();
         assert_eq_pretty!(expected, actual);
+
+        // The nested registration is gone with its ancestor's rescan: nothing is reported on its behalf anymore.
+        fake.emulate_file_changed(root3.join("file"));
+        expect_nothing!(&mut session);
+
+        // The ancestor is still watched, as any rescanned path.
+        fake.emulate_file_changed(root2.join("file"));
+        expect_changed_file!(&mut session, root2.join("file"));
+        expect_nothing!(&mut session);
+
+        // The client re-registers what it wants under the rescanned path.
+        session.watch_root(&root3, Scope::DirectChildren);
+        fake.emulate_file_changed(root3.join("file"));
+        expect_changed_file!(&mut session, root3.join("file"));
+        expect_nothing!(&mut session);
     })
 }
 
@@ -1026,7 +1084,7 @@ fn symlink_recreated_with_the_same_target_does_not_rescan() {
     symlink(Path::new("../dir"), &symlink_path);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(dir.path().join("root"), Scope::DirectChildren);
+        session.add_watch_root(dir.path().join("root"), Scope::DirectChildren);
         session.watch_symlink(&symlink_path, Scope::DirectChildren).unwrap();
 
         // re-create the link with the very same target, as e.g. a package manager does on reinstall
@@ -1053,7 +1111,7 @@ fn root_changed_on_an_unchanged_root_rescans_once_and_keeps_it_watched() {
     let root_path = dir.path().join("parent/root");
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&root_path, Scope::DirectChildren);
+        session.add_watch_root(&root_path, Scope::DirectChildren);
 
         fake.emulate_event(&root_path, BackendEvent::Ambiguous);
         expect_rescan!(&mut session, root_path);
@@ -1075,7 +1133,7 @@ fn root_changed_on_an_unchanged_symlinked_root_rescans_once() {
     symlink(dir.path().join("canonical"), &link);
     test(|fake, watcher| {
         let mut session = watcher.session();
-        session.watch_root(&link, Scope::DirectChildren);
+        session.add_watch_root(&link, Scope::DirectChildren);
 
         fake.emulate_event(dir.path().join("canonical"), BackendEvent::Ambiguous);
         expect_rescan!(&mut session, link);

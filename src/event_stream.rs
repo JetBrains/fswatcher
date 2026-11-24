@@ -24,7 +24,7 @@ pub(crate) fn event_stream<'a>(watcher: impl Deref<Target = Watcher> + 'a + Send
     assert_valid_path(&path);
 
     let mut session = session(watcher);
-    session.watch_root(&path, scope);
+    session.add_watch_root(&path, scope);
     let stream = async_stream::stream! {
         loop {
             let event = session.next_event().await.unwrap_or_else(|_overflow| Event::Rescan { path: path.to_path_buf() });
@@ -54,7 +54,7 @@ pub(crate) fn immediate_stream<'a>(watcher: impl Deref<Target = Watcher> + 'a + 
         }
 
         let mut session = session(watcher);
-        session.watch_root(&path, Scope::DirectChildren);
+        session.add_watch_root(&path, Scope::DirectChildren);
         let initial = im_subscribe(&session, &path);
 
         let stream = async_stream::stream! {

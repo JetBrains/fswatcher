@@ -25,7 +25,7 @@ fn main() {
     let roots: Vec<PathBuf> = target_paths
         .into_iter()
         .map(|path| {
-            session.watch_root(&path, Scope::DirectChildren);
+            session.add_watch_root(&path, Scope::DirectChildren);
             let t0 = std::time::Instant::now();
             walk_recursively(&mut session, &path, &mut on_file);
             println!("walk {:?}, elapsed {:?}", path, t0.elapsed());
