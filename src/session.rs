@@ -97,10 +97,21 @@ impl<'a> Drop for WatchSessionTx<'a> {
 
 impl<'a> WatchSessionTx<'a> {
     /// See [`WatchSession::watch_root`].
-    #[instrument(level = "trace", skip_all, fields(path = %path.as_ref().display(), scope))]
+    #[deprecated(note = "use `add_watch_root`: a `watch_root` under a rescanned path is dropped with it, an `add_watch_root` survives and reports on its own")]
     pub fn watch_root(&self, path: impl AsRef<Path>, scope: Scope) {
-        trace!("watch_root");
-        let path = path.as_ref();
+        self.register(path.as_ref(), scope, false)
+    }
+
+    /// See [`WatchSession::add_watch_root`].
+    pub fn add_watch_root(&self, path: impl AsRef<Path>, scope: Scope) {
+        self.register(path.as_ref(), scope, true)
+    }
+
+    /// Registers `path` as a top-level subscription. A `root` is exempt from being forgotten with the `Rescan` of a
+    /// path above it and gets its own event instead, see `SessionState::forget_below`.
+    #[instrument(level = "trace", skip_all, fields(path = %path.display(), scope, root))]
+    fn register(&self, path: &Path, scope: Scope, root: bool) {
+        trace!("register");
         validate_path(path);
         let mut state = self.inner.state.lock().expect("mutex is poisoned");
         let subscription_id = SubscriptionId::from_non_zero_u32(self.inner.watcher.id_source.next());
@@ -119,11 +130,13 @@ impl<'a> WatchSessionTx<'a> {
                     MissingPolicy::Track,
                     &mut real_io(self.inner.watcher.backend.as_ref(), *canonicalization_subscription_id),
                 )
-                .expect("watch_root tracks missing paths and always registers")
+                .expect("a top-level registration tracks missing paths and always registers")
         };
         state.symbolic_paths.insert(root_key, (subscription_id, scope));
         state.symbolic_tree.insert(path, root_key);
-        state.root_keys.insert(root_key);
+        if root {
+            state.root_keys.insert(root_key);
+        }
         drop(state);
 
         self.inner.watcher.register_subscription(self.inner.session_id, subscription_id);
@@ -253,7 +266,7 @@ impl<'a> WatchSessionTx<'a> {
             canonical_path,
         }) = registration
         else {
-            // The path is not a symlink and does not exist. Unlike watch_root, watch_symlink does
+            // The path is not a symlink and does not exist. Unlike add_watch_root, watch_symlink does
             // not keep a pending subscription waiting for a non-existing link to appear.
             return Err(CanonicalizationError::PathDoesNotExist.into());
         };
@@ -372,8 +385,30 @@ impl<'a> WatchSession<'a> {
     ///
     /// If the target path can no longer be resolved to a file system entry, Event::Removed will be sent to the client.
     /// If canonicalization of the target path changes in any way (e.g. due to changes in symlinks), Event::Rescan will be sent to the client.
+    ///
+    /// A `Rescan` or `Removed` for a path above this one covers it: the client receives one event per subtree, never
+    /// one per registration under it, and the session drops the covered registration as `remove_watches` on the
+    /// covering path would. The client re-registers what it still wants when it re-reads the subtree. A client that
+    /// watches `dir` and `dir/sub/file` this way hears nothing more about `dir/sub/file` after a `Rescan` of `dir`
+    /// until it registers it again; see [`Self::add_watch_root`] for a root that survives.
+    #[deprecated(note = "use `add_watch_root`: a `watch_root` under a rescanned path is dropped with it, an `add_watch_root` survives and reports on its own")]
     pub fn watch_root(&self, path: impl AsRef<Path>, scope: Scope) {
+        #[allow(deprecated)]
         self.tx.watch_root(path, scope)
+    }
+
+    /// Subscribes to `path` and every parent of it, including any encountered symlink chains.
+    /// Succeeds even if the path does not exist. The subscriber gets a notification if it appears.
+    ///
+    /// If the target path can no longer be resolved to a file system entry, Event::Removed will be sent to the client.
+    /// If canonicalization of the target path changes in any way (e.g. due to changes in symlinks), Event::Rescan will be sent to the client.
+    ///
+    /// Every root is tracked independently of the others. A `Rescan` or `Removed` for a path above a root does not
+    /// cover it: the root stays registered, its watches are re-established, and it receives an event of its own. A
+    /// client that watches `dir` and `dir/sub/file` keeps receiving events about `dir/sub/file` after a `Rescan` of
+    /// `dir`. `remove_watches` on `dir` still drops both.
+    pub fn add_watch_root(&self, path: impl AsRef<Path>, scope: Scope) {
+        self.tx.add_watch_root(path, scope)
     }
 
     /// The client is responsible for ensuring that every path segment leading up to `path` is already watched.
@@ -603,8 +638,10 @@ impl SessionState {
     /// tracker stops following them. The key itself and the roots below stay.
     ///
     /// Returns `true` if an ancestor in `must_rescan` covers this key: it is pruned by the ancestor in the same way,
-    /// its client is about to re-register it, and no event must be sent for it. A root is never covered: the client
-    /// registered it on its own and expects its own event, see `rescan_delievered_on_each_registered_root`.
+    /// its client is about to re-register it, and no event must be sent for it. A root (`add_watch_root`) is never
+    /// covered: the client registered it on its own and expects its own event, see
+    /// `rescan_delievered_on_each_registered_root`. The deprecated `watch_root` registers no root and is covered like
+    /// any other registration below, see `watch_root_rescan_delivered_once_per_subtree`.
     fn forget_below(&mut self, sym_key: SymbolicKey, sym_path: &Path, must_rescan: &HashSet<SymbolicKey>, watcher: &Watcher) -> bool {
         let pruned = self.symbolic_tree.prune(
             sym_path,
