@@ -36,13 +36,15 @@ bitvec = "1"
 futures = "0.3"
 slab = "0.4"
 thiserror = "2.0"
-tokio  = { version = "1.54", features = ["full"] }
+tokio = { version = "1.54", features = ["sync", "macros"] }
 tracing = "0.1.44"
 
 [target.'cfg(target_os="linux")'.dependencies]
 inotify = "0.11"
+tokio = { version = "1.54", features = ["rt"] }
 
 [target.'cfg(target_os="windows")'.dependencies]
+tokio = { version = "1.54", features = ["time", "fs"] }
 windows = { version = "0.62.2", features = ["Devices_Enumeration", "Devices_Portable", "Foundation", "Storage", "Storage_Search", "Win32_Foundation", "Win32_Security", "Win32_Storage", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
 
 [target.'cfg(target_os="macos")'.dependencies]
@@ -53,5 +55,6 @@ nix = {  version = "0.31", features = ["event", "fs"] }
 libc = "0.2"
 
 [dev-dependencies]
+tokio = { version = "1.54", features = ["rt-multi-thread", "time", "macros"] }
 tempfile = "3.27.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
