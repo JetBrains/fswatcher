@@ -32,7 +32,6 @@ type_complexity = "allow"
 [dependencies]
 anyhow = "1.0"
 async-stream = "0.3.6"
-bitvec = "1"
 futures = "0.3"
 slab = "0.4"
 thiserror = "2.0"
